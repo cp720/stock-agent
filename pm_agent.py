@@ -9,6 +9,7 @@ from datetime import datetime
 from fundamental_analyst import fundamental_analyst_agent
 from technical_analyst import technical_analyst_agent
 from instructions.pm_instructions import PM_INSTRUCTIONS
+from watchlist import WATCHLIST
 
 
 # initialize Alpaca trading client
@@ -92,5 +93,31 @@ trading_team = Team(
     instructions=PM_INSTRUCTIONS,
 )
 
+def run_single(ticker: str):
+    """Analyze a single ticker and send a recommendation."""
+    trading_team.print_response(
+        f"Analyze {ticker}. Should I buy, sell, or hold?",
+        stream=True
+    )
+
+
+def run_watchlist():
+    """Analyze every ticker in the watchlist sequentially and send a recommendation for each."""
+    print(f"\n=== Watchlist Scan Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    print(f"Tickers: {', '.join(WATCHLIST)}\n")
+
+    for ticker in WATCHLIST:
+        print(f"\n--- Analyzing {ticker} ---")
+        try:
+            trading_team.print_response(
+                f"Analyze {ticker}. Should I buy, sell, or hold?",
+                stream=True
+            )
+        except Exception as e:
+            print(f"Error analyzing {ticker}: {e}")
+
+    print(f"\n=== Watchlist Scan Complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+
+
 if __name__ == "__main__":
-    trading_team.print_response("Analyze PSTG. I want to know if I should buy it?", stream=True)
+    run_watchlist()
