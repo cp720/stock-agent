@@ -1,0 +1,7 @@
+pandas-ta-openbb
+agno
+openai 
+alpaca-py 
+requests
+yfinance
+python-dotenv
