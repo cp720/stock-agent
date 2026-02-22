@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from agno.agent import Agent
 from agno.tools import tool # Import decorator
 from agno.models.openai import OpenAIChat
+from instructions.technical_instructions import TECHNICAL_INSTRUCTIONS
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -98,18 +99,13 @@ technical_analyst_agent = Agent(
     role="Expert Technical Stock Analyst specializing in price action, RSI, and momentum trends.",
     model=model,
     tools=[get_technical_indicators],
-    instructions=[
-        "Use the get_technical_indicators tool to analyze the provided symbols.",
-        "Focus on identifying oversold/overbought conditions via RSI.",
-        "Assess trend strength using the Momentum (ROC) indicator.",
-        "Provide a clear, data-driven summary for each stock."
-    ],
+    instructions=TECHNICAL_INSTRUCTIONS,
     markdown=True
 )
 
 
 
 if __name__ == "__main__":
-    response = technical_analyst_agent.run("Analyze the technical indicators for ANET and B (Barrick Mining Gold Corp) and provide insights on their current market conditions.")
+    response = technical_analyst_agent.run("Analyze the technical indicators for ANET and APLD and provide insights on their current market conditions.")
     report = response.content
     print(report)
