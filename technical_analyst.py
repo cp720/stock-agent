@@ -1,8 +1,7 @@
 import pandas as pd
 import pandas_ta as ta
 from config import ALPACA_API_KEY, ALPACA_SECRET_KEY, OPENAI_API_KEY
-import json
-from typing import List, Dict, Any
+from typing import List
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from agno.agent import Agent
@@ -20,7 +19,7 @@ alpaca_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
 # Define output structure for technical indicators
 class TechnicalIndicatorResults(BaseModel):
     symbol: str = Field(..., description="The stock ticker symbol")
-    price: str = Field(..., description="Current market price")
+    price: float = Field(..., description="Current market price in USD")
     rsi_value: float = Field(..., description="The calculated RSI (14-period)")
     rsi_signal: str = Field(..., description="Interpretation: Oversold, Overbought, or Neutral")
     momentum_pct: float = Field(..., description="The 10-day Rate of Change percentage")
@@ -38,9 +37,9 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
         List[TechnicalIndicatorResults]: A list of results containing the latest price, RSI value and signal, and Momentum percentage and signal for each stock symbol.
     """
 
-    # fetch data
+    # fetch data — 90 days gives RSI-14 and ROC-10 a comfortable warm-up window
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=60)
+    start_date = end_date - timedelta(days=90)
     
     request_params = StockBarsRequest(
         symbol_or_symbols=symbols,
@@ -69,21 +68,27 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
             rsi_value = latest['RSI']
             momentum_pct = latest['Momentum']
 
-            # interpret indicators
+            # Guard against NaN values (insufficient data for indicator warm-up)
+            if pd.isna(rsi_value) or pd.isna(momentum_pct):
+                print(f"Warning: Insufficient data to compute indicators for {symbol}. Skipping.")
+                continue
+
+            # Interpret indicators
             rsi_signal = "Oversold" if rsi_value < 30 else "Overbought" if rsi_value > 70 else "Neutral"
             momentum_signal = "Positive" if momentum_pct > 0 else "Negative"
 
             results.append(TechnicalIndicatorResults(
                 symbol=symbol,
-                price=f"${latest_price:.2f}",
+                price=round(latest_price, 2),
                 rsi_value=round(rsi_value, 2),
                 rsi_signal=rsi_signal,
-                momentum_pct=momentum_pct,
+                momentum_pct=round(momentum_pct, 4),
                 momentum_signal=momentum_signal
             ))
+        except KeyError:
+            print(f"Error: No data returned for symbol '{symbol}'. It may be an invalid ticker.")
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
-            continue
     return results
 
 model = OpenAIChat(id="gpt-4.1", temperature=0.2, api_key=OPENAI_API_KEY)
