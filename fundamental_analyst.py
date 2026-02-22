@@ -2,6 +2,7 @@ from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 from agno.tools.yfinance import YFinanceTools
 from config import OPENAI_API_KEY
+from instructions.fundamental_instructions import FUNDAMENTAL_INSTRUCTIONS
 
 # --- Fundamental Analyst Agent ---
 
@@ -13,14 +14,7 @@ fundamental_analyst_agent = Agent(
     role="Expert in financial ratios, earnings reports, and market sentiment.",
     model=model,
     tools=[YFinanceTools()],
-    instructions=[
-        "Start by checking the company's valuation ratios (P/E, P/S) relative to its sector.",
-        "Review the latest news headlines to identify any immediate risks or catalysts.",
-        "Review earnings reports for revenue growth, profit margins, and cash flow trends.",
-        "Summarize the consensus among Wall Street analysts (Buy, Hold, or Sell).",
-        "Look for 'Free Cash Flow' and 'Debt-to-Equity' to ensure the company is financially stable.",
-        "Provide a final 'Fundamental Score' (1-10) with a brief justification."
-    ],
+    instructions=FUNDAMENTAL_INSTRUCTIONS,
     markdown=True
 )
 

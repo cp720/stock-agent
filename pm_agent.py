@@ -8,6 +8,7 @@ from alpaca.trading.client import TradingClient
 from datetime import datetime
 from fundamental_analyst import fundamental_analyst_agent
 from technical_analyst import technical_analyst_agent
+from instructions.pm_instructions import PM_INSTRUCTIONS
 
 
 # initialize Alpaca trading client
@@ -88,25 +89,7 @@ trading_team = Team(
     add_member_tools_to_context=True,
     add_datetime_to_context=True,
     markdown=True,
-    # --- Instructions for the team ---
-    instructions=[
-        "### Phase 1: Investigation",
-        "Request the Technical and Fundamental reports from your members for the given ticker.",
-        
-        "### Phase 2: Live Verification",
-        "Call 'get_account_balance' and 'get_portfolio_positions' to see current funds and holdings.",
-        
-        "### Phase 3: Risk Math",
-        "If Technical is 'Bullish' and Fundamental > 7, calculate BUY quantity.",
-        "Use the formula: $$S = \\frac{E \\times 0.10}{P}$$ to calculate the number of shares to buy (S), where you risk only 10% of your total equity (E) at the current price (P).",
-        "If Technical is 'Bearish' and Fundamental < 4, calculate SELL quantity if the stock is currently held. Use the same formula but based on the current position size instead of equity.",
-        "(Where S=Shares, E=Total Equity, P=Current Price).",
-        "If the action is HOLD, still call send_n8n_notification with action='HOLD' and quantity=0.",
-        
-        "### Phase 4: Final Action",
-        "You MUST call 'send_n8n_notification' with the final recommendation.",
-        "Include a 'thesis' summarizing the indicator results and the fundamental score."
-    ],
+    instructions=PM_INSTRUCTIONS,
 )
 
 if __name__ == "__main__":
