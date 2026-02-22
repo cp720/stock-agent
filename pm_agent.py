@@ -104,7 +104,7 @@ trading_team = Team(
         "Use the formula: $$S = \\frac{E \\times 0.10}{P}$$ to calculate the number of shares to buy (S), where you risk only 10% of your total equity (E) at the current price (P).",
         "If Technical is 'Bearish' and Fundamental < 4, calculate SELL quantity if the stock is currently held. Use the same formula but based on the current position size instead of equity.",
         "(Where S=Shares, E=Total Equity, P=Current Price).",
-        "If the recommendation is HOLD or if the risk math suggests less than 1 share, do not recommend a trade.",
+        "If the action is HOLD, still call send_n8n_notification with action='HOLD' and quantity=0.",
         
         "### Phase 4: Final Action",
         "You MUST call 'send_n8n_notification' with the final recommendation.",
