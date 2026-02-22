@@ -1,5 +1,5 @@
 import requests
-from config import ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, ALPACA_BASE_URL, OPENAI_API_KEY
+from config import ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, OPENAI_API_KEY, N8N_WEBHOOK_URL
 from agno.agent import Agent
 from agno.team import Team
 from agno.models.openai import OpenAIChat
@@ -13,26 +13,23 @@ from technical_analyst import technical_analyst_agent
 # initialize Alpaca trading client
 alpaca_trading_client = TradingClient(ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, paper=True)
 
-# --- Notififcation Tool ----
+# --- Notification Tool ---
 @tool(show_result=True)
 def send_n8n_notification(ticker: str, action: str, quantity: int, thesis: str, in_portfolio: bool):
     """
-    REQUIRED FINAL STEP: Use this tool to execute the recommendation. 
-    This is the only way the user receives the trade alert. 
-    You MUST call this if you have a BUY or SELL recommendation.
-    
+    REQUIRED FINAL STEP: Use this tool to execute the recommendation.
+    This is the only way the user receives the trade alert.
+    You MUST call this for every recommendation, including HOLD.
+
     Args:
         ticker (str): The stock symbol (e.g., 'AAPL').
         action (str): The recommended action ('BUY', 'SELL', or 'HOLD').
-        quantity (int): The number of shares to trade.
+        quantity (int): The number of shares to trade (0 for HOLD).
         thesis (str): A 2-3 sentence explanation of the technical and fundamental reasoning.
-        in_portfolio (bool): Whether the stock is currently in the portfolio ('YES' or 'NO').
+        in_portfolio (bool): Whether the stock is currently held in the portfolio.
     Returns:
         str: A confirmation message indicating the notification was sent.
     """
-    # n8n webhook URL 
-    webhook_url = "https://cpatino10.app.n8n.cloud/webhook-test/5451463e-3de0-4daa-8afc-d2a5f1073328"
-    
     payload = {
         "ticker": ticker,
         "action": action,
@@ -41,15 +38,15 @@ def send_n8n_notification(ticker: str, action: str, quantity: int, thesis: str, 
         "in_portfolio": in_portfolio,
         "timestamp": datetime.now().isoformat()
     }
-    
+
     try:
-        response = requests.post(webhook_url, json=payload)
+        response = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=10)
         response.raise_for_status()
         return f"Successfully sent {action} recommendation for {ticker} to n8n."
     except Exception as e:
         return f"Failed to send notification: {str(e)}"
 
-# --- Alpca account tools ---
+# --- Alpaca account tools ---
 
 @tool(show_result=True)
 def get_account_balance() -> dict:
@@ -84,7 +81,7 @@ def get_portfolio_positions() -> dict:
 # --- The Team ---
 trading_team = Team(
     name="Portfolio Management Team",
-    role="Chief Invvestment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
+    role="Chief Investment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
     members=[fundamental_analyst_agent, technical_analyst_agent],
     tools=[send_n8n_notification, get_account_balance, get_portfolio_positions],
     model=OpenAIChat(id="gpt-4.1", temperature=0.3, api_key=OPENAI_API_KEY),
@@ -113,4 +110,4 @@ trading_team = Team(
 )
 
 if __name__ == "__main__":
-    trading_team.print_response("Analzye PSTG. I want to know if I should buy it?", stream=True)
+    trading_team.print_response("Analyze PSTG. I want to know if I should buy it?", stream=True)
