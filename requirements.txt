@@ -32,7 +32,9 @@ numpy==2.2.6
 openai==2.18.0
 packaging==26.0
 pandas==3.0.0
+pandas-market-calendars==4.6.1
 pandas-ta==0.4.71b0
+schedule==1.2.2
 patsy==1.0.2
 peewee==3.19.0
 platformdirs==4.5.1
