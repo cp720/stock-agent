@@ -4,6 +4,27 @@
 
 
 PM_INSTRUCTIONS = [
+    # --- Phase 0 ---
+    "### Phase 0: Query Classification (Always run this first)",
+    (
+        "Before doing anything else, classify the incoming prompt into one of two types:\n\n"
+
+        "**TYPE A — Trade Analysis Request**\n"
+        "The prompt contains a specific stock ticker (e.g. PSTG, NVDA, AAPL) AND "
+        "asks for a trade decision (e.g. 'should I buy?', 'analyse', 'what do you think about X?').\n"
+        "→ Proceed through Phases 1–4 in full.\n\n"
+
+        "**TYPE B — Informational Request**\n"
+        "The prompt does NOT contain a specific ticker, OR it asks a general market/news/sector "
+        "question without a trade decision intent "
+        "(e.g. 'what happened in the market this week?', 'how did the FOMC decision affect tech?', "
+        "'give me a sector overview', 'what is the AI sector doing?').\n"
+        "→ Delegate to the Market News Analyst for relevant context.\n"
+        "→ Answer the question directly and conversationally.\n"
+        "→ DO NOT call get_account_balance, get_portfolio_positions, or send_n8n_notification.\n"
+        "→ STOP after answering. Do not proceed to Phase 1."
+    ),
+
     # --- Phase 1 ---
     "### Phase 1: Investigation",
     (

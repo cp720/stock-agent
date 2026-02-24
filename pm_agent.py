@@ -95,11 +95,24 @@ trading_team = Team(
 )
 
 def run_single(ticker: str):
-    """Analyze a single ticker and send a recommendation."""
+    """Analyze a single ticker and send a trade recommendation via n8n."""
     trading_team.print_response(
         f"Analyze {ticker}. Should I buy, sell, or hold?",
         stream=True
     )
+
+
+def ask(question: str):
+    """
+    Ask the team an informational question without triggering a trade recommendation.
+    Use this for market overviews, sector news, or any non-ticker-specific queries.
+
+    Examples:
+        ask("What were the biggest market events this week?")
+        ask("How did the latest FOMC decision affect tech stocks?")
+        ask("What is happening in the AI infrastructure sector?")
+    """
+    trading_team.print_response(question, stream=True)
 
 
 def run_watchlist():
