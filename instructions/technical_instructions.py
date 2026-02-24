@@ -38,11 +38,21 @@ TECHNICAL_INSTRUCTIONS = [
         "  - SMA-20 above SMA-50: Bullish alignment; SMA-20 below SMA-50: Bearish alignment"
     ),
 
+    # --- VWAP (20-day rolling) ---
+    (
+        "Interpret the 20-day rolling VWAP (institutional benchmark):\n"
+        "  - Price above VWAP: Institutions have been net buyers at lower prices — bullish bias\n"
+        "  - Price below VWAP: Price is trading below the institutional cost basis — bearish bias\n"
+        "  - Note: This is a rolling daily VWAP, not an intraday session VWAP. "
+        "It reflects the volume-weighted average over the past 20 trading days."
+    ),
+
     # --- Overall Signal ---
     (
         "Report the overall_signal field ('Bullish', 'Bearish', or 'Neutral') prominently. "
-        "This is a scored verdict across all 5 indicators and is the primary input for the Portfolio Manager. "
-        "Always state how many indicators were bullish vs bearish (e.g. '4 of 5 bullish')."
+        "This is a scored verdict across all 6 indicators (RSI, Momentum, MACD, SMA-20, SMA-50, VWAP) "
+        "and is the primary input for the Portfolio Manager. "
+        "Always state the vote tally explicitly (e.g. '5 of 6 bullish')."
     ),
 
     # --- Output Format ---
@@ -52,7 +62,8 @@ TECHNICAL_INSTRUCTIONS = [
         "  2. RSI reading and interpretation\n"
         "  3. Momentum (ROC) reading and interpretation\n"
         "  4. MACD reading and interpretation\n"
-        "  5. Moving averages and price position\n"
-        "  6. Overall Signal with vote tally and 1–2 sentence summary"
+        "  5. Moving averages (SMA-20 and SMA-50) and price position\n"
+        "  6. VWAP (20-day rolling) and price position\n"
+        "  7. Overall Signal with vote tally and 1–2 sentence summary"
     ),
 ]

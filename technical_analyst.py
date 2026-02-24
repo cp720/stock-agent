@@ -42,12 +42,16 @@ class TechnicalIndicatorResults(BaseModel):
     price_vs_sma_20: str = Field(..., description="Whether price is Above or Below the 20-day SMA")
     price_vs_sma_50: str = Field(..., description="Whether price is Above or Below the 50-day SMA")
 
+    # --- VWAP (20-day rolling) ---
+    vwap_20: float = Field(..., description="20-day rolling Volume Weighted Average Price — institutional benchmark")
+    price_vs_vwap: str = Field(..., description="Whether price is Above or Below the 20-day rolling VWAP")
+
     # --- Synthesized Signal ---
     overall_signal: str = Field(
         ...,
         description=(
-            "Synthesized verdict across all indicators: Bullish, Bearish, or Neutral. "
-            "Bullish = 4+ of 5 indicators are bullish. Bearish = 4+ of 5 are bearish. Neutral = mixed."
+            "Synthesized verdict across all 6 indicators (RSI, Momentum, MACD, SMA-20, SMA-50, VWAP): "
+            "Bullish = 4+ of 6 bullish, Bearish = 4+ of 6 bearish, Neutral = mixed."
         )
     )
 
@@ -102,6 +106,14 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
             df['SMA_20'] = ta.sma(df['close'], length=20)
             df['SMA_50'] = ta.sma(df['close'], length=50)
 
+            # --- Rolling 20-day VWAP (institutional benchmark) ---
+            # Classic VWAP resets intraday; for daily bars we use a 20-day rolling window
+            typical_price = (df['high'] + df['low'] + df['close']) / 3
+            df['VWAP_20'] = (
+                (typical_price * df['volume']).rolling(20).sum()
+                / df['volume'].rolling(20).sum()
+            )
+
             latest = df.iloc[-1]
             latest_price  = latest['close']
             rsi_value     = latest['RSI']
@@ -111,9 +123,10 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
             macd_hist     = latest['MACD_hist']
             sma_20        = latest['SMA_20']
             sma_50        = latest['SMA_50']
+            vwap_20       = latest['VWAP_20']
 
             # Guard against NaN (insufficient warm-up data)
-            required = [rsi_value, momentum_pct, macd_line, macd_signal, macd_hist, sma_20, sma_50]
+            required = [rsi_value, momentum_pct, macd_line, macd_signal, macd_hist, sma_20, sma_50, vwap_20]
             if any(pd.isna(v) for v in required):
                 print(f"Warning: Insufficient data to compute all indicators for {symbol}. Skipping.")
                 continue
@@ -124,8 +137,9 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
             macd_crossover  = "Bullish" if macd_line > macd_signal else "Bearish"
             price_vs_sma_20 = "Above" if latest_price > sma_20 else "Below"
             price_vs_sma_50 = "Above" if latest_price > sma_50 else "Below"
+            price_vs_vwap   = "Above" if latest_price > vwap_20 else "Below"
 
-            # --- Synthesize overall signal (score out of 5) ---
+            # --- Synthesize overall signal (score out of 6) ---
             # Each indicator casts one bullish or bearish vote
             bullish_votes = sum([
                 rsi_signal != "Overbought",          # RSI not overbought = bullish
@@ -133,8 +147,9 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
                 macd_crossover == "Bullish",          # MACD above signal = bullish
                 price_vs_sma_20 == "Above",           # Price above SMA-20 = bullish
                 price_vs_sma_50 == "Above",           # Price above SMA-50 = bullish
+                price_vs_vwap == "Above",             # Price above VWAP = institutional bullish bias
             ])
-            bearish_votes = 5 - bullish_votes
+            bearish_votes = 6 - bullish_votes
 
             if bullish_votes >= 4:
                 overall_signal = "Bullish"
@@ -158,6 +173,8 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
                 sma_50=round(sma_50, 2),
                 price_vs_sma_20=price_vs_sma_20,
                 price_vs_sma_50=price_vs_sma_50,
+                vwap_20=round(vwap_20, 2),
+                price_vs_vwap=price_vs_vwap,
                 overall_signal=overall_signal,
             ))
 
