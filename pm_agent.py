@@ -11,7 +11,9 @@ from technical_analyst import technical_analyst_agent
 from market_news_analyst import market_news_analyst_agent
 from instructions.pm_instructions import PM_INSTRUCTIONS
 from watchlist import WATCHLIST
+from logger import get_logger
 
+logger = get_logger(__name__)
 
 # initialize Alpaca trading client
 alpaca_trading_client = TradingClient(ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, paper=True)
@@ -117,20 +119,20 @@ def ask(question: str):
 
 def run_watchlist():
     """Analyze every ticker in the watchlist sequentially and send a recommendation for each."""
-    print(f"\n=== Watchlist Scan Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    print(f"Tickers: {', '.join(WATCHLIST)}\n")
+    logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(WATCHLIST))
 
     for ticker in WATCHLIST:
-        print(f"\n--- Analyzing {ticker} ---")
+        logger.info("Analyzing %s ...", ticker)
         try:
             trading_team.print_response(
                 f"Analyze {ticker}. Should I buy, sell, or hold?",
                 stream=True
             )
+            logger.info("Completed analysis for %s.", ticker)
         except Exception as e:
-            print(f"Error analyzing {ticker}: {e}")
+            logger.error("Failed to analyze %s: %s", ticker, e)
 
-    print(f"\n=== Watchlist Scan Complete: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
+    logger.info("=== Watchlist Scan Complete ===")
 
 
 if __name__ == "__main__":

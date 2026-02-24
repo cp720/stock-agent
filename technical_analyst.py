@@ -11,8 +11,11 @@ from instructions.technical_instructions import TECHNICAL_INSTRUCTIONS
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from logger import get_logger
 
 # --- Technical Analyst Agent ---
+
+logger = get_logger(__name__)
 
 # Initialize Alpaca client
 alpaca_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
@@ -128,7 +131,7 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
             # Guard against NaN (insufficient warm-up data)
             required = [rsi_value, momentum_pct, macd_line, macd_signal, macd_hist, sma_20, sma_50, vwap_20]
             if any(pd.isna(v) for v in required):
-                print(f"Warning: Insufficient data to compute all indicators for {symbol}. Skipping.")
+                logger.warning("Insufficient data to compute all indicators for %s — skipping.", symbol)
                 continue
 
             # --- Interpret each indicator ---
@@ -179,9 +182,9 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
             ))
 
         except KeyError:
-            print(f"Error: No data returned for symbol '{symbol}'. It may be an invalid ticker.")
+            logger.error("No data returned for symbol '%s' — it may be an invalid ticker.", symbol)
         except Exception as e:
-            print(f"Error processing {symbol}: {e}")
+            logger.error("Unexpected error processing %s: %s", symbol, e)
 
     return results
 
