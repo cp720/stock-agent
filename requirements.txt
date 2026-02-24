@@ -9,6 +9,7 @@ charset-normalizer==3.4.4
 click==8.3.1
 colorama==0.4.6
 curl_cffi==0.13.0
+ddgs==9.10.0
 distro==1.9.0
 docstring_parser==0.17.0
 frozendict==2.4.7

@@ -6,8 +6,14 @@
 PM_INSTRUCTIONS = [
     # --- Phase 1 ---
     "### Phase 1: Investigation",
-    "Request the Technical and Fundamental reports from your team members for the given ticker.",
-    "Wait for both reports before proceeding.",
+    (
+        "Request reports from ALL THREE of your team members for the given ticker:\n"
+        "  1. Technical Analyst — price action, indicators, and overall_signal\n"
+        "  2. Fundamental Analyst — valuation, financials, earnings, and Fundamental Score\n"
+        "  3. Market News Analyst — macro context, sector news, company catalysts, "
+        "and CRITICAL_RISK flag\n\n"
+        "Wait for all three reports before proceeding to Phase 2."
+    ),
 
     # --- Phase 2 ---
     "### Phase 2: Live Account Check",
@@ -16,21 +22,29 @@ PM_INSTRUCTIONS = [
     # --- Phase 3 ---
     "### Phase 3: Risk-Sizing and Decision",
     (
-        "Using the Technical signal and Fundamental score from Phase 1, and the account data from Phase 2, "
-        "determine the recommended action. Use the price reported by the Technical Analyst as P in all formulas "
+        "Using the reports from Phase 1 and account data from Phase 2, determine the recommended action. "
+        "Use the price reported by the Technical Analyst as P in all formulas "
         "— do NOT fetch or estimate price from any other source.\n\n"
-        "determine the recommended action using these rules:\n\n"
 
-        "**BUY** — if Technical is 'Bullish' AND Fundamental score > 7:\n"
+        "Apply the following rules IN ORDER (earlier rules take priority):\n\n"
+
+        "**CRITICAL RISK OVERRIDE — Check this FIRST**\n"
+        "If the Market News Analyst reports CRITICAL_RISK: YES:\n"
+        "  - Set action = SELL regardless of Technical or Fundamental signals.\n"
+        "  - If the stock IS currently held: S = (current_position_value × 0.50) / P\n"
+        "  - If the stock is NOT held: action is SELL (short — we bet on further decline).\n"
+        "  - State the critical risk prominently at the start of the thesis.\n\n"
+
+        "**BUY** — if CRITICAL_RISK is NO, AND Technical is 'Bullish', AND Fundamental score > 7:\n"
         "  - If the stock is NOT currently held: S = (E × 0.10) / P\n"
         "  - If the stock IS currently held: S = (current_position_value × 0.30) / P\n"
-        "  - Where S = shares to buy, E = total equity,"
-        "  - P = the price field returned by the Technical Analyst in their report (closing price from Alpaca data).\n"
+        "  - Where S = shares to buy, E = total equity, "
+        "P = the price field returned by the Technical Analyst.\n"
         "  - Cap S so that (S × P) does not exceed available buying power.\n\n"
 
-        "**SELL** — if Technical is 'Bearish' AND Fundamental score < 4:\n"
+        "**SELL** — if CRITICAL_RISK is NO, AND Technical is 'Bearish', AND Fundamental score < 4:\n"
         "  - If the stock is currently held: S = (current_position_value × 0.50) / P\n"
-        "  - If the stock is NOT held: action is SELL (eventhough its not owned, we bet on the price decreasing more).\n\n"
+        "  - If the stock is NOT held: action is SELL (short — we bet on further decline).\n\n"
 
         "**HOLD** — in all other cases, including when Fundamental score is between 4 and 7 "
         "(regardless of Technical signal), or when signals are mixed. Set quantity = 0."
@@ -42,7 +56,11 @@ PM_INSTRUCTIONS = [
         "You MUST call 'send_n8n_notification' with the following fields:\n"
         "  - action: 'BUY', 'SELL', or 'HOLD'\n"
         "  - quantity: the calculated S value (0 for HOLD)\n"
-        "  - thesis: 2–3 sentences summarising the Technical signal(including the price used), Fundamental score, "
-        "current position status, and why this action was chosen."
+        "  - thesis: 3–4 sentences covering ALL of the following:\n"
+        "      1. Technical signal and vote tally (e.g. '5 of 6 bullish') with price used\n"
+        "      2. Fundamental Score and the key metric driving it\n"
+        "      3. News sentiment and any relevant catalyst, sector trend, or risk\n"
+        "         (if CRITICAL_RISK: YES, state it clearly here)\n"
+        "      4. Current position status and why this action was chosen"
     ),
 ]
