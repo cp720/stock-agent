@@ -8,6 +8,7 @@ from alpaca.trading.client import TradingClient
 from datetime import datetime
 from fundamental_analyst import fundamental_analyst_agent
 from technical_analyst import technical_analyst_agent
+from market_news_analyst import market_news_analyst_agent
 from instructions.pm_instructions import PM_INSTRUCTIONS
 from watchlist import WATCHLIST
 
@@ -84,7 +85,7 @@ def get_portfolio_positions() -> dict:
 trading_team = Team(
     name="Portfolio Management Team",
     role="Chief Investment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
-    members=[fundamental_analyst_agent, technical_analyst_agent],
+    members=[fundamental_analyst_agent, technical_analyst_agent, market_news_analyst_agent],
     tools=[send_n8n_notification, get_account_balance, get_portfolio_positions],
     model=OpenAIChat(id="gpt-4.1", temperature=0.3, api_key=OPENAI_API_KEY),
     add_member_tools_to_context=True,
