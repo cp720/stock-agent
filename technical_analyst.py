@@ -249,10 +249,13 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
 
             # --- Bollinger Bands (20-period, 2σ) ---
             bb_df = ta.bbands(df['close'], length=20, std=2)
-            df['BB_Upper']     = bb_df['BBU_20_2.0']
-            df['BB_Lower']     = bb_df['BBL_20_2.0']
-            df['BB_Width']     = bb_df['BBW_20_2.0']
-            df['BB_Percent_B'] = bb_df['BBP_20_2.0']
+            # Column names vary by pandas-ta version (e.g. 'BBU_20_2.0' vs 'BBU_20_2.0_2.0')
+            # Use prefix lookup for version-agnostic access
+            bb_col = {c[:3]: c for c in bb_df.columns}  # {'BBU': 'BBU_...', 'BBL': 'BBL_...', ...}
+            df['BB_Upper']     = bb_df[bb_col['BBU']]
+            df['BB_Lower']     = bb_df[bb_col['BBL']]
+            df['BB_Width']     = bb_df[bb_col['BBB']]   # BBB = Bandwidth (may also appear as BBW)
+            df['BB_Percent_B'] = bb_df[bb_col['BBP']]
 
             # BB Squeeze: True when width is in the bottom 20% of its 20-period range
             bb_width_min = df['BB_Width'].rolling(20).min()
