@@ -56,19 +56,29 @@ PM_INSTRUCTIONS = [
         "  - If the stock is NOT held: action is SELL (short — we bet on further decline).\n"
         "  - State the critical risk prominently at the start of the thesis.\n\n"
 
-        "**BUY** — if CRITICAL_RISK is NO, AND Technical is 'Bullish', AND Fundamental score > 7:\n"
+        "**Signal Confidence Gate (from ADX — check before BUY/SELL)**\n"
+        "The Technical Analyst reports a signal_confidence field derived from ADX:\n"
+        "  - High (ADX > 25): Strong trend — act on the technical signal normally.\n"
+        "  - Moderate (ADX 20–25): Forming trend — act, but note the moderate confidence in the thesis.\n"
+        "  - Low (ADX < 20): Ranging/choppy market — treat any technical BUY or SELL signal as HOLD "
+        "unless the Fundamental score independently justifies the action (score > 8 for BUY, "
+        "score < 3 for SELL). State the low-confidence caveat prominently in the thesis.\n\n"
+
+        "**BUY** — if CRITICAL_RISK is NO, AND Technical is 'Bullish', AND Fundamental score > 7, "
+        "AND signal_confidence is High or Moderate:\n"
         "  - If the stock is NOT currently held: S = (E × 0.10) / P\n"
         "  - If the stock IS currently held: S = (current_position_value × 0.30) / P\n"
         "  - Where S = shares to buy, E = total equity, "
         "P = the price field returned by the Technical Analyst.\n"
         "  - Cap S so that (S × P) does not exceed available buying power.\n\n"
 
-        "**SELL** — if CRITICAL_RISK is NO, AND Technical is 'Bearish', AND Fundamental score < 4:\n"
+        "**SELL** — if CRITICAL_RISK is NO, AND Technical is 'Bearish', AND Fundamental score < 4, "
+        "AND signal_confidence is High or Moderate:\n"
         "  - If the stock is currently held: S = (current_position_value × 0.50) / P\n"
         "  - If the stock is NOT held: action is SELL (short — we bet on further decline).\n\n"
 
-        "**HOLD** — in all other cases, including when Fundamental score is between 4 and 7 "
-        "(regardless of Technical signal), or when signals are mixed. Set quantity = 0."
+        "**HOLD** — in all other cases, including: Fundamental score between 4 and 7, "
+        "mixed signals, OR signal_confidence is Low (ADX < 20 ranging market). Set quantity = 0."
     ),
 
     # --- Phase 4 ---
@@ -78,7 +88,8 @@ PM_INSTRUCTIONS = [
         "  - action: 'BUY', 'SELL', or 'HOLD'\n"
         "  - quantity: the calculated S value (0 for HOLD)\n"
         "  - thesis: 3–4 sentences covering ALL of the following:\n"
-        "      1. Technical signal and vote tally (e.g. '5 of 6 bullish') with price used\n"
+        "      1. Technical signal, vote tally (e.g. '6 of 8 bullish'), signal_confidence level, "
+        "and price used; note bb_squeeze=True as a breakout alert if present\n"
         "      2. Fundamental Score and the key metric driving it\n"
         "      3. News sentiment and any relevant catalyst, sector trend, or risk\n"
         "         (if CRITICAL_RISK: YES, state it clearly here)\n"
