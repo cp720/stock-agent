@@ -7,15 +7,17 @@ An AI-powered multi-agent stock trading system that analyzes equities using tech
 ## Architecture
 
 ```
-pm_agent.py          ← Entry point; orchestrates the Team
+pm_agent.py          ← Entry point; orchestrates the Team + executes trades
 ├── fundamental_analyst.py   ← Fundamental Analyst Agent (yFinance)
-└── technical_analyst.py     ← Technical Analyst Agent (Alpaca + pandas-ta)
+├── technical_analyst.py     ← Technical Analyst Agent (Alpaca + pandas-ta)
+└── market_news_analyst.py   ← Market News Analyst Agent (DuckDuckGo)
 config.py            ← Loads all API keys from .env
+watchlist.py         ← Tickers to scan each run
 ```
 
 ### Agent Team (Agno framework)
 - **Portfolio Management Team** (`pm_agent.py`) — `agno.team.Team`, model: `gpt-4.1`
-  - Coordinates both sub-agents, checks account/portfolio, applies risk math, fires n8n webhook
+  - Coordinates sub-agents, checks account/portfolio, applies risk math, executes trades via Alpaca, fires n8n webhook
 - **Fundamental Analyst** (`fundamental_analyst.py`) — `agno.agent.Agent`, model: `gpt-4.1`
   - Uses `YFinanceTools` for valuation ratios, earnings, news, analyst consensus; outputs score 1–10
 - **Technical Analyst** (`technical_analyst.py`) — `agno.agent.Agent`, model: `gpt-4.1`
@@ -65,9 +67,20 @@ python technical_analyst.py
 
 **Position sizing formula:** `Shares = (Equity × 0.10) / CurrentPrice` (10% equity risk per trade)
 
+## Trade Execution
+
+After the PM agent decides BUY/SELL/HOLD, it executes trades via `execute_trade()` in `pm_agent.py` using Alpaca's paper trading API. Built-in safeguards:
+
+- **Market hours check** — orders only submitted when market is open
+- **No short selling** — SELL orders skipped if position not held
+- **Max position size** — no single position > 15% of total equity (`MAX_POSITION_PCT`)
+- **Daily trade limit** — max 10 trades per day (`MAX_DAILY_TRADES`)
+
+The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check) → Phase 3 (risk-sizing) → **Phase 4 (execute)** → Phase 5 (notify).
+
 ## Notifications
 
-Trade recommendations are sent via **n8n webhook** using `send_n8n_notification()` in `pm_agent.py`. The webhook URL is hardcoded in that function.
+Trade recommendations and execution results are sent via **n8n webhook** using `send_n8n_notification()` in `pm_agent.py`. The webhook payload includes `execution_status`, `order_id`, and `filled_price`.
 
 ## Two Virtual Environments
 

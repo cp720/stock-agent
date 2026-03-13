@@ -12,7 +12,7 @@ PM_INSTRUCTIONS = [
         "**TYPE A — Trade Analysis Request**\n"
         "The prompt contains a specific stock ticker (e.g. PSTG, NVDA, AAPL) AND "
         "asks for a trade decision (e.g. 'should I buy?', 'analyse', 'what do you think about X?').\n"
-        "→ Proceed through Phases 1–4 in full.\n\n"
+        "→ Proceed through Phases 1–5 in full.\n\n"
 
         "**TYPE B — Informational Request**\n"
         "The prompt does NOT contain a specific ticker, OR it asks a general market/news/sector "
@@ -91,12 +91,33 @@ PM_INSTRUCTIONS = [
     ),
 
     # --- Phase 4 ---
-    "### Phase 4: Notification",
+    "### Phase 4: Execution",
+    (
+        "If the action from Phase 3 is BUY or SELL, call 'execute_trade' with the ticker, action, "
+        "and quantity (S).\n"
+        "Parse the result to extract: execution_status, order_id, filled_qty, filled_price, "
+        "and execution_note.\n\n"
+
+        "If the action is HOLD, skip this phase entirely — proceed to Phase 5 with "
+        "execution_status='hold' and empty order_id/filled_price/execution_note.\n\n"
+
+        "If execution_status is 'skipped' or 'failed', do NOT retry. Accept the result and include "
+        "the execution_note in your thesis in Phase 5.\n\n"
+
+        "If execution_status is 'executed', note the order_id and filled_price for inclusion in Phase 5."
+    ),
+
+    # --- Phase 5 ---
+    "### Phase 5: Notification",
     (
         "You MUST call 'send_n8n_notification' with the following fields:\n"
         "  - action: 'BUY', 'SELL', or 'HOLD'\n"
         "  - quantity: the calculated S value (0 for HOLD)\n"
-        "  - thesis: 4–5 sentences covering ALL of the following:\n"
+        "  - execution_status: the status from Phase 4 ('executed', 'skipped', 'failed', or 'hold')\n"
+        "  - order_id: the Alpaca order ID from Phase 4 (empty string if not executed)\n"
+        "  - filled_price: the actual fill price from Phase 4 (empty string if not executed)\n"
+        "  - execution_note: the note from Phase 4 (empty string for HOLD)\n"
+        "  - thesis: 5–6 sentences covering ALL of the following:\n"
         "      1. Technical signal, vote tally (e.g. '6 of 8 bullish'), signal_confidence level, "
         "and price used; note bb_squeeze=True as a breakout alert if present\n"
         "      2. Reversal status: if reversal_alert is not 'None', state it and list "
@@ -105,6 +126,8 @@ PM_INSTRUCTIONS = [
         "      3. Fundamental Score and the key metric driving it\n"
         "      4. News sentiment and any relevant catalyst, sector trend, or risk\n"
         "         (if CRITICAL_RISK: YES, state it clearly here)\n"
-        "      5. Current position status and why this action was chosen"
+        "      5. Current position status and why this action was chosen\n"
+        "      6. Execution result: state whether the trade was executed, skipped, or failed, "
+        "and include the reason. If executed, include the order_id and filled_price."
     ),
 ]
