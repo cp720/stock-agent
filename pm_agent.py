@@ -18,6 +18,17 @@ from logger import get_logger
 
 logger = get_logger(__name__)
 
+# --- Trade Journal (graceful degradation) ---
+try:
+    from trade_journal import (
+        initialize_db, TradeDecision, SignalSnapshot,
+        OpenPosition, EquitySnapshot, close_oldest_position
+    )
+    JOURNAL_ENABLED = True
+except ImportError:
+    JOURNAL_ENABLED = False
+    logger.warning("Trade journal not available — trade logging disabled.")
+
 # initialize Alpaca trading client
 alpaca_trading_client = TradingClient(ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, paper=True)
 
@@ -73,9 +84,76 @@ def send_n8n_notification(
     try:
         response = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=10)
         response.raise_for_status()
-        return f"Successfully sent {action} recommendation for {ticker} to n8n."
+        webhook_result = f"Successfully sent {action} recommendation for {ticker} to n8n."
     except Exception as e:
-        return f"Failed to send notification: {str(e)}"
+        webhook_result = f"Failed to send notification: {str(e)}"
+
+    # --- Auto-log trade decision to journal ---
+    if JOURNAL_ENABLED:
+        try:
+            initialize_db()
+
+            # Parse filled_price to float
+            fp = None
+            if filled_price and filled_price not in ("", "pending"):
+                try:
+                    fp = float(filled_price)
+                except (ValueError, TypeError):
+                    fp = None
+
+            # Account snapshot
+            acct_equity = acct_buying_power = acct_cash = None
+            try:
+                account = alpaca_trading_client.get_account()
+                acct_equity = float(account.equity)
+                acct_buying_power = float(account.buying_power)
+                acct_cash = float(account.cash)
+            except Exception:
+                pass
+
+            decision = TradeDecision.create(
+                ticker=ticker,
+                action=action.upper(),
+                quantity=quantity,
+                execution_status=execution_status,
+                order_id=order_id or "",
+                filled_price=fp,
+                filled_qty=quantity if execution_status == "executed" else None,
+                execution_note=execution_note or "",
+                equity=acct_equity,
+                buying_power=acct_buying_power,
+                cash=acct_cash,
+                thesis=thesis,
+            )
+
+            # Position lifecycle
+            if execution_status == "executed" and fp is not None:
+                if action.upper() == "BUY":
+                    OpenPosition.create(
+                        ticker=ticker,
+                        status='open',
+                        entry_date=datetime.now(timezone.utc),
+                        entry_price=fp,
+                        entry_qty=quantity,
+                        entry_decision=decision,
+                    )
+                elif action.upper() == "SELL":
+                    close_oldest_position(ticker, fp, quantity, decision)
+
+            # Equity snapshot
+            if acct_equity is not None:
+                EquitySnapshot.create(
+                    equity=acct_equity,
+                    cash=acct_cash,
+                    buying_power=acct_buying_power,
+                )
+
+            logger.info("Trade decision logged: %s %s %s (status: %s, id: %d)",
+                        action, quantity, ticker, execution_status, decision.id)
+        except Exception as e:
+            logger.error("Failed to log trade decision: %s", e)
+
+    return webhook_result
 
 # --- Alpaca account tools ---
 
@@ -232,12 +310,137 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
         return f"execution_status: failed | execution_note: Unexpected error — {str(e)}"
 
 
+# --- Trade Journal Signal Attribution Tool ---
+
+@tool(show_result=True)
+def log_trade_signals(
+    ticker: str,
+    overall_signal: str = "",
+    signal_confidence: str = "",
+    rsi_value: float = 0.0,
+    rsi_signal: str = "",
+    momentum_pct: float = 0.0,
+    momentum_signal: str = "",
+    macd_crossover: str = "",
+    price_vs_sma_20: str = "",
+    price_vs_sma_50: str = "",
+    price_vs_vwap: str = "",
+    adx_value: float = 0.0,
+    adx_direction: str = "",
+    bb_signal: str = "",
+    bb_squeeze: bool = False,
+    bb_percent_b: float = 0.0,
+    obv_trend: str = "",
+    obv_divergence: str = "",
+    stoch_signal: str = "",
+    rsi_divergence: str = "",
+    macd_divergence: str = "",
+    reversal_alert: str = "",
+    reversal_factors: str = "",
+    technical_price: float = 0.0,
+    fundamental_score: int = 0,
+    fundamental_key_metric: str = "",
+    news_sentiment: str = "",
+    critical_risk: bool = False,
+    news_summary: str = "",
+) -> str:
+    """
+    Log signal attribution data for the most recent trade decision on this ticker.
+    Call this AFTER send_n8n_notification to attach signal data for performance analysis.
+
+    Args:
+        ticker: The stock ticker this signal data belongs to.
+        overall_signal: Technical overall signal (Bullish/Bearish/Neutral).
+        signal_confidence: Signal confidence from ADX (High/Moderate/Low).
+        rsi_value: RSI-14 numeric value.
+        rsi_signal: RSI interpretation (Oversold/Overbought/Neutral).
+        momentum_pct: 10-day ROC percentage.
+        momentum_signal: Momentum interpretation (Positive/Negative).
+        macd_crossover: MACD crossover status (Bullish/Bearish).
+        price_vs_sma_20: Price vs SMA-20 (Above/Below).
+        price_vs_sma_50: Price vs SMA-50 (Above/Below).
+        price_vs_vwap: Price vs VWAP-20 (Above/Below).
+        adx_value: ADX numeric value.
+        adx_direction: ADX directional bias (Bullish/Bearish).
+        bb_signal: Bollinger Band signal (Overbought/Oversold/Neutral).
+        bb_squeeze: Whether BB squeeze is active.
+        bb_percent_b: BB %B numeric value.
+        obv_trend: OBV trend (Rising/Falling).
+        obv_divergence: OBV divergence (Bullish/Bearish/None).
+        stoch_signal: Stochastic signal (Overbought/Oversold/Neutral).
+        rsi_divergence: RSI divergence status.
+        macd_divergence: MACD divergence status.
+        reversal_alert: Reversal alert status.
+        reversal_factors: Comma-separated reversal factors.
+        technical_price: Price from the Technical Analyst.
+        fundamental_score: Fundamental score (1-10).
+        fundamental_key_metric: Key metric driving the score.
+        news_sentiment: News sentiment (Positive/Negative/Neutral/Mixed).
+        critical_risk: Whether a critical risk event was flagged.
+        news_summary: News summary text.
+    Returns:
+        str: Confirmation that signals were logged.
+    """
+    if not JOURNAL_ENABLED:
+        return "Trade journal not available — signals not logged."
+
+    try:
+        initialize_db()
+
+        decision = (TradeDecision
+                    .select()
+                    .where(TradeDecision.ticker == ticker)
+                    .order_by(TradeDecision.timestamp.desc())
+                    .first())
+
+        if not decision:
+            return f"No trade decision found for {ticker} — signals not logged."
+
+        SignalSnapshot.create(
+            decision=decision,
+            overall_signal=overall_signal or None,
+            signal_confidence=signal_confidence or None,
+            rsi_value=rsi_value if rsi_value != 0.0 else None,
+            rsi_signal=rsi_signal or None,
+            momentum_pct=momentum_pct if momentum_pct != 0.0 else None,
+            momentum_signal=momentum_signal or None,
+            macd_crossover=macd_crossover or None,
+            price_vs_sma_20=price_vs_sma_20 or None,
+            price_vs_sma_50=price_vs_sma_50 or None,
+            price_vs_vwap=price_vs_vwap or None,
+            adx_value=adx_value if adx_value != 0.0 else None,
+            adx_direction=adx_direction or None,
+            bb_signal=bb_signal or None,
+            bb_squeeze=bb_squeeze,
+            bb_percent_b=bb_percent_b if bb_percent_b != 0.0 else None,
+            obv_trend=obv_trend or None,
+            obv_divergence=obv_divergence or None,
+            stoch_signal=stoch_signal or None,
+            rsi_divergence=rsi_divergence or None,
+            macd_divergence=macd_divergence or None,
+            reversal_alert=reversal_alert or None,
+            reversal_factors=reversal_factors or None,
+            technical_price=technical_price if technical_price != 0.0 else None,
+            fundamental_score=fundamental_score if fundamental_score != 0 else None,
+            fundamental_key_metric=fundamental_key_metric or None,
+            news_sentiment=news_sentiment or None,
+            critical_risk=critical_risk,
+            news_summary=news_summary or None,
+        )
+
+        return f"Signal attribution logged for {ticker} (decision #{decision.id})."
+
+    except Exception as e:
+        logger.error("Failed to log signals for %s: %s", ticker, e)
+        return f"Failed to log signals: {str(e)}"
+
+
 # --- The Team ---
 trading_team = Team(
     name="Portfolio Management Team",
     role="Chief Investment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
     members=[fundamental_analyst_agent, technical_analyst_agent, market_news_analyst_agent],
-    tools=[send_n8n_notification, get_account_balance, get_portfolio_positions, execute_trade],
+    tools=[send_n8n_notification, get_account_balance, get_portfolio_positions, execute_trade, log_trade_signals],
     model=OpenAIChat(id="gpt-4.1", temperature=0.3, api_key=OPENAI_API_KEY),
     add_member_tools_to_context=True,
     add_datetime_to_context=True,

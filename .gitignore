@@ -4,6 +4,9 @@
 logs/
 *.log
 
+# Trade journal database
+data/
+
 # Python cache
 __pycache__/
 *.pyc

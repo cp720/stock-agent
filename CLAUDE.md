@@ -11,6 +11,7 @@ pm_agent.py          ← Entry point; orchestrates the Team + executes trades
 ├── fundamental_analyst.py   ← Fundamental Analyst Agent (yFinance)
 ├── technical_analyst.py     ← Technical Analyst Agent (Alpaca + pandas-ta)
 └── market_news_analyst.py   ← Market News Analyst Agent (DuckDuckGo)
+trade_journal.py     ← Trade journal: Peewee models, P&L reporting, CLI
 config.py            ← Loads all API keys from .env
 watchlist.py         ← Tickers to scan each run
 ```
@@ -32,6 +33,7 @@ watchlist.py         ← Tickers to scan each run
 | `alpaca-py` | Historical data + paper trading |
 | `yfinance` | Fundamental data |
 | `pandas-ta-openbb` | Technical indicators (RSI, ROC) |
+| `peewee` | ORM for trade journal (SQLite) |
 | `python-dotenv` | Secrets management |
 
 ## Environment Variables (`.env`)
@@ -76,11 +78,26 @@ After the PM agent decides BUY/SELL/HOLD, it executes trades via `execute_trade(
 - **Max position size** — no single position > 15% of total equity (`MAX_POSITION_PCT`)
 - **Daily trade limit** — max 10 trades per day (`MAX_DAILY_TRADES`)
 
-The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check) → Phase 3 (risk-sizing) → **Phase 4 (execute)** → Phase 5 (notify).
+The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check) → Phase 3 (risk-sizing) → **Phase 4 (execute)** → Phase 5 (notify) → Phase 6 (journal).
 
 ## Notifications
 
 Trade recommendations and execution results are sent via **n8n webhook** using `send_n8n_notification()` in `pm_agent.py`. The webhook payload includes `execution_status`, `order_id`, and `filled_price`.
+
+## Trade Journal / P&L Tracker
+
+Every decision (BUY, SELL, HOLD, skipped, failed) is automatically logged to a SQLite database at `data/trade_journal.db` using Peewee ORM. Signal attribution data (all technical indicators, fundamental score, news sentiment) is captured via the `log_trade_signals` tool in Phase 6.
+
+**CLI reporting:**
+```bash
+python trade_journal.py report      # P&L summary + per-ticker breakdown
+python trade_journal.py decisions   # Last 20 trade decisions
+python trade_journal.py signals     # Per-signal attribution analysis
+python trade_journal.py positions   # Open positions in journal
+python trade_journal.py all         # All reports
+```
+
+**Schema:** 4 tables — `trade_decisions`, `signal_snapshots`, `open_positions`, `equity_snapshots`. Position lifecycle uses FIFO matching (oldest BUY closed first on SELL).
 
 ## Two Virtual Environments
 
