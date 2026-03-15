@@ -187,6 +187,159 @@ def get_portfolio_positions() -> dict:
     return {p.symbol: float(p.qty) for p in positions}
 
 
+# --- Portfolio Risk Assessment Tool ---
+
+@tool(show_result=True)
+def get_portfolio_risk_assessment() -> dict:
+    """
+    Returns a comprehensive portfolio risk snapshot including exposure summary,
+    per-position risk detail, portfolio-level risk metrics, and advisory risk flags.
+    Use this tool in Phase 2 to understand portfolio risk before making trade decisions.
+    This is advisory only — no actions are blocked.
+
+    Returns:
+        dict: A dictionary with keys 'exposure_summary', 'positions', 'risk_metrics',
+              and 'risk_flags'.
+    """
+    try:
+        # --- Account data ---
+        account = alpaca_trading_client.get_account()
+        equity = float(account.equity)
+        cash = float(account.cash)
+        last_equity = float(account.last_equity) if account.last_equity else None
+        long_market_value = float(account.long_market_value) if account.long_market_value else 0.0
+
+        # --- Positions data ---
+        positions = alpaca_trading_client.get_all_positions()
+
+        position_details = []
+        total_unrealized_pnl = 0.0
+        total_intraday_pnl = 0.0
+
+        for p in positions:
+            mv = float(p.market_value) if p.market_value else 0.0
+            cost = float(p.cost_basis) if p.cost_basis else 0.0
+            upl = float(p.unrealized_pl) if p.unrealized_pl else 0.0
+            uplpc = float(p.unrealized_plpc) if p.unrealized_plpc else 0.0
+            intra_pl = float(p.unrealized_intraday_pl) if p.unrealized_intraday_pl else 0.0
+            cur_price = float(p.current_price) if p.current_price else 0.0
+            avg_entry = float(p.avg_entry_price) if p.avg_entry_price else 0.0
+            weight = (abs(mv) / equity * 100) if equity > 0 else 0.0
+
+            total_unrealized_pnl += upl
+            total_intraday_pnl += intra_pl
+
+            position_details.append({
+                "ticker": p.symbol,
+                "qty": float(p.qty),
+                "market_value": round(mv, 2),
+                "cost_basis": round(cost, 2),
+                "avg_entry_price": round(avg_entry, 2),
+                "current_price": round(cur_price, 2),
+                "unrealized_pnl": round(upl, 2),
+                "unrealized_pnl_pct": round(uplpc * 100, 2),
+                "weight_pct": round(weight, 2),
+                "intraday_pnl": round(intra_pl, 2),
+            })
+
+        # --- Exposure summary ---
+        invested_pct = (long_market_value / equity * 100) if equity > 0 else 0.0
+        cash_pct = (cash / equity * 100) if equity > 0 else 0.0
+
+        exposure_summary = {
+            "total_equity": round(equity, 2),
+            "cash": round(cash, 2),
+            "total_invested": round(long_market_value, 2),
+            "cash_pct": round(cash_pct, 1),
+            "invested_pct": round(invested_pct, 1),
+            "num_positions": len(positions),
+        }
+
+        # --- Drawdown from peak (trade journal) ---
+        drawdown_from_peak = 0.0
+        if JOURNAL_ENABLED:
+            try:
+                initialize_db()
+                peak_row = (EquitySnapshot
+                            .select(EquitySnapshot.equity)
+                            .order_by(EquitySnapshot.equity.desc())
+                            .first())
+                if peak_row and peak_row.equity > 0:
+                    drawdown_from_peak = ((equity - peak_row.equity) / peak_row.equity) * 100
+            except Exception:
+                pass
+
+        # --- Risk metrics ---
+        largest_position_pct = max((pos["weight_pct"] for pos in position_details), default=0.0)
+        total_unrealized_pnl_pct = (total_unrealized_pnl / equity * 100) if equity > 0 else 0.0
+        day_change_pct = (
+            ((equity - last_equity) / last_equity * 100)
+            if last_equity and last_equity > 0 else 0.0
+        )
+
+        risk_metrics = {
+            "largest_position_pct": round(largest_position_pct, 2),
+            "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+            "total_unrealized_pnl_pct": round(total_unrealized_pnl_pct, 2),
+            "intraday_pnl": round(total_intraday_pnl, 2),
+            "drawdown_from_peak": round(drawdown_from_peak, 2),
+            "day_change_pct": round(day_change_pct, 2),
+        }
+
+        # --- Advisory risk flags ---
+        risk_flags = []
+
+        for pos in position_details:
+            if pos["weight_pct"] >= 12.0:
+                risk_flags.append(
+                    f"HIGH CONCENTRATION: {pos['ticker']} is {pos['weight_pct']:.1f}% "
+                    f"of equity (near 15% limit)"
+                )
+
+        if drawdown_from_peak <= -5.0:
+            risk_flags.append(
+                f"PORTFOLIO DRAWDOWN: {drawdown_from_peak:.1f}% from peak equity"
+            )
+
+        if cash_pct < 20.0 and len(positions) > 0:
+            risk_flags.append(f"LOW CASH: Only {cash_pct:.1f}% cash remaining")
+
+        if invested_pct > 80.0:
+            risk_flags.append(f"HEAVY EXPOSURE: {invested_pct:.1f}% of equity is invested")
+
+        if total_intraday_pnl < 0 and equity > 0 and abs(total_intraday_pnl) > equity * 0.01:
+            intraday_pct = (total_intraday_pnl / equity * 100)
+            risk_flags.append(
+                f"INTRADAY LOSS: Portfolio down ${total_intraday_pnl:,.2f} "
+                f"({intraday_pct:.1f}%) today"
+            )
+
+        if total_unrealized_pnl_pct <= -5.0:
+            risk_flags.append(
+                f"UNREALIZED LOSS: Total unrealized P&L is "
+                f"${total_unrealized_pnl:,.2f} ({total_unrealized_pnl_pct:.1f}%)"
+            )
+
+        if not risk_flags:
+            risk_flags.append("NO RISK FLAGS: Portfolio within normal parameters")
+
+        return {
+            "exposure_summary": exposure_summary,
+            "positions": position_details,
+            "risk_metrics": risk_metrics,
+            "risk_flags": risk_flags,
+        }
+
+    except Exception as e:
+        logger.error("Failed to get portfolio risk assessment: %s", e)
+        return {
+            "exposure_summary": {},
+            "positions": [],
+            "risk_metrics": {},
+            "risk_flags": [f"RISK ASSESSMENT UNAVAILABLE: {str(e)}"],
+        }
+
+
 # --- Trade Execution Tool ---
 
 @tool(show_result=True)
@@ -440,7 +593,7 @@ trading_team = Team(
     name="Portfolio Management Team",
     role="Chief Investment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
     members=[fundamental_analyst_agent, technical_analyst_agent, market_news_analyst_agent],
-    tools=[send_n8n_notification, get_account_balance, get_portfolio_positions, execute_trade, log_trade_signals],
+    tools=[send_n8n_notification, get_account_balance, get_portfolio_positions, get_portfolio_risk_assessment, execute_trade, log_trade_signals],
     model=OpenAIChat(id="gpt-4.1", temperature=0.3, api_key=OPENAI_API_KEY),
     add_member_tools_to_context=True,
     add_datetime_to_context=True,

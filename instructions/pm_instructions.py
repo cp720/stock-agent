@@ -37,8 +37,18 @@ PM_INSTRUCTIONS = [
     ),
 
     # --- Phase 2 ---
-    "### Phase 2: Live Account Check",
-    "Call 'get_account_balance' and 'get_portfolio_positions' to retrieve current buying power and holdings.",
+    "### Phase 2: Live Account Check & Risk Assessment",
+    (
+        "Call ALL THREE of these tools to get a complete picture of the account:\n"
+        "  1. 'get_account_balance' — current equity, buying power, cash\n"
+        "  2. 'get_portfolio_positions' — current holdings {ticker: qty}\n"
+        "  3. 'get_portfolio_risk_assessment' — comprehensive risk snapshot including "
+        "exposure summary, per-position detail (market value, unrealized P&L, concentration %), "
+        "portfolio-level risk metrics (drawdown, intraday P&L, largest position), "
+        "and advisory risk flags\n\n"
+        "Review the risk_flags list from the risk assessment. These flags are advisory — "
+        "they do not block any action. Use them to inform your decision in Phase 3."
+    ),
 
     # --- Phase 3 ---
     "### Phase 3: Risk-Sizing and Decision",
@@ -63,6 +73,14 @@ PM_INSTRUCTIONS = [
         "  - Low (ADX < 20): Ranging/choppy market — treat any technical BUY or SELL signal as HOLD "
         "unless the Fundamental score independently justifies the action (score > 8 for BUY, "
         "score < 3 for SELL). State the low-confidence caveat prominently in the thesis.\n\n"
+
+        "**Portfolio Risk Context (from Phase 2 risk assessment — advisory, not blocking)**\n"
+        "Review the risk_flags from get_portfolio_risk_assessment and adjust your decision:\n"
+        "  - HIGH CONCENTRATION for this ticker → reduce BUY quantity by 50%, or HOLD if already overweight.\n"
+        "  - HEAVY EXPOSURE / LOW CASH → use more conservative sizing (halve the standard BUY formula).\n"
+        "  - PORTFOLIO DRAWDOWN > -10% → strongly favor HOLD over new BUYs; preserve capital.\n"
+        "  - INTRADAY LOSS → note in thesis but do not override multi-day analysis.\n"
+        "  - These are guidelines, not hard rules. Use judgment based on signal strength.\n\n"
 
         "**Reversal Alert Gate — check before BUY**\n"
         "The Technical Analyst reports a reversal_alert field:\n"
@@ -128,7 +146,9 @@ PM_INSTRUCTIONS = [
         "         (if CRITICAL_RISK: YES, state it clearly here)\n"
         "      5. Current position status and why this action was chosen\n"
         "      6. Execution result: state whether the trade was executed, skipped, or failed, "
-        "and include the reason. If executed, include the order_id and filled_price."
+        "and include the reason. If executed, include the order_id and filled_price.\n"
+        "      7. Portfolio risk context: mention any active risk flags from the risk assessment. "
+        "If none, state 'No portfolio risk flags.'"
     ),
 
     # --- Phase 6 ---

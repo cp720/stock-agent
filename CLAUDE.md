@@ -51,7 +51,7 @@ OPENAI_API_KEY=          # OpenAI API
 
 ```bash
 # Activate virtual environment
-source venv/bin/activate   # or venv_agent
+source venv_agent/bin/activate   # or venv_agent
 
 # Run full team analysis
 python pm_agent.py
@@ -78,7 +78,24 @@ After the PM agent decides BUY/SELL/HOLD, it executes trades via `execute_trade(
 - **Max position size** — no single position > 15% of total equity (`MAX_POSITION_PCT`)
 - **Daily trade limit** — max 10 trades per day (`MAX_DAILY_TRADES`)
 
-The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check) → Phase 3 (risk-sizing) → **Phase 4 (execute)** → Phase 5 (notify) → Phase 6 (journal).
+The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check + risk assessment) → Phase 3 (risk-sizing) → **Phase 4 (execute)** → Phase 5 (notify) → Phase 6 (journal).
+
+## Portfolio Risk Assessment
+
+The PM agent calls `get_portfolio_risk_assessment()` in Phase 2 to get a comprehensive portfolio snapshot before making trade decisions. Returns four sections:
+
+- **Exposure Summary** — total equity, cash, invested amount, cash/invested percentages, number of positions
+- **Per-Position Detail** — for each holding: market value, cost basis, unrealized P&L ($ and %), portfolio weight %, intraday P&L
+- **Risk Metrics** — largest position concentration, total unrealized P&L, intraday P&L, drawdown from peak equity, day-over-day change
+- **Advisory Risk Flags** — human-readable warnings when thresholds are breached:
+  - `HIGH CONCENTRATION` — single position ≥ 12% of equity
+  - `PORTFOLIO DRAWDOWN` — equity ≥ 5% below peak
+  - `LOW CASH` — cash < 20% of equity
+  - `HEAVY EXPOSURE` — invested > 80% of equity
+  - `INTRADAY LOSS` — portfolio down > 1% today
+  - `UNREALIZED LOSS` — total unrealized P&L ≤ -5%
+
+Risk flags are **advisory only** — they inform the PM agent's sizing and decision logic in Phase 3 but do not hard-block any action.
 
 ## Notifications
 
