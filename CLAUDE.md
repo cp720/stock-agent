@@ -11,9 +11,10 @@ pm_agent.py          ← Entry point; orchestrates the Team + executes trades
 ├── fundamental_analyst.py   ← Fundamental Analyst Agent (yFinance)
 ├── technical_analyst.py     ← Technical Analyst Agent (Alpaca + pandas-ta)
 └── market_news_analyst.py   ← Market News Analyst Agent (DuckDuckGo)
+screener.py          ← Dynamic watchlist generator (Alpaca ScreenerClient + yFinance)
 trade_journal.py     ← Trade journal: Peewee models, P&L reporting, CLI
 config.py            ← Loads all API keys from .env
-watchlist.py         ← Tickers to scan each run
+watchlist.py         ← Static fallback watchlist (used if screener returns 0 results)
 ```
 
 ### Agent Team (Agno framework)
@@ -53,13 +54,36 @@ OPENAI_API_KEY=          # OpenAI API
 # Activate virtual environment
 source venv_agent/bin/activate   # or venv_agent
 
-# Run full team analysis
+# Run full team analysis (screener runs automatically)
 python pm_agent.py
+
+# Test the dynamic screener standalone
+python screener.py
 
 # Run individual agents standalone
 python fundamental_analyst.py
 python technical_analyst.py
 ```
+
+## Dynamic Screener
+
+Each run, `screener.py` replaces the static watchlist with a market-driven candidate list. The static `watchlist.py` is kept only as a fallback (used when the screener returns 0 results).
+
+**Two-stage pipeline:**
+
+| Stage | Source | What it pulls |
+|---|---|---|
+| Stage 1 | Alpaca `ScreenerClient` | Most actives (top 25 by volume) + top movers: gainers (15) + losers (15) |
+| Stage 1 | yFinance `yf.screen()` | `"day_gainers"` (top 25) + `"most_actives"` (top 25) |
+| Stage 2 | Alpaca daily bars | Filter by price ≥ $5 and RVOL ≥ 1.5× — sort by RVOL descending, cap at 15 |
+
+**RVOL (Relative Volume)** = today's bar volume ÷ 30-day average volume. High RVOL signals unusual activity (earnings, news, institutional flow) — the key signal to prioritize for deeper analysis.
+
+**Scalability path (future):**
+- News heat layer — yfinance `.get_news()` count in last 24h as a tiebreaker
+- Earnings calendar filter — avoid or target earnings via yfinance `.calendar`
+- Sector concentration cap — limit to N tickers per sector
+- FMP fundamental pre-filter — eliminate junk before running full analysis
 
 ## Trade Decision Logic
 

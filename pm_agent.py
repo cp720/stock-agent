@@ -13,7 +13,7 @@ from fundamental_analyst import fundamental_analyst_agent
 from technical_analyst import technical_analyst_agent
 from market_news_analyst import market_news_analyst_agent
 from instructions.pm_instructions import PM_INSTRUCTIONS
-from watchlist import WATCHLIST
+from screener import get_dynamic_watchlist
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -623,10 +623,11 @@ def ask(question: str):
 
 
 def run_watchlist():
-    """Analyze every ticker in the watchlist sequentially and send a recommendation for each."""
-    logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(WATCHLIST))
+    """Run the dynamic screener, then analyze each candidate sequentially."""
+    watchlist = get_dynamic_watchlist()
+    logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(watchlist))
 
-    for ticker in WATCHLIST:
+    for ticker in watchlist:
         logger.info("Analyzing %s ...", ticker)
         try:
             trading_team.print_response(

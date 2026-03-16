@@ -1,0 +1,242 @@
+"""
+screener.py
+Dynamic watchlist generator — replaces static watchlist.py with market-driven candidates.
+
+Two-stage pipeline
+------------------
+Stage 1 — Generate (~40-70 raw symbols):
+    Alpaca ScreenerClient  → most actives (top 25 by volume)
+                           → top movers: gainers (15) + losers (15)
+    yfinance screeners     → "day_gainers" (top 25)
+                           → "most_actives" (top 25)
+
+Stage 2 — Filter & rank:
+    Fetch 35 days of daily OHLCV from Alpaca (one batch request)
+    Compute: price (last bar close), avg_vol (30-day mean), RVOL = today / avg
+    Keep:    price >= $5, RVOL >= 1.5x
+    Sort:    descending RVOL
+    Cap:     MAX_CANDIDATES (15)
+
+Fallback: returns WATCHLIST from watchlist.py if all sources fail or filter yields 0.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import yfinance as yf
+from alpaca.data.enums import MarketType, MostActivesBy
+from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
+from alpaca.data.requests import (
+    MarketMoversRequest,
+    MostActivesRequest,
+    StockBarsRequest,
+)
+from alpaca.data.timeframe import TimeFrame
+
+from config import ALPACA_API_KEY, ALPACA_SECRET_KEY
+from logger import get_logger
+from watchlist import WATCHLIST as STATIC_WATCHLIST
+
+logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+MIN_PRICE = 5.0          # Minimum last-bar close price ($)
+MIN_RVOL = 1.5           # Today's volume must be >= 1.5x 30-day average
+MAX_CANDIDATES = 15      # Maximum tickers returned to the PM agent
+_BAR_LOOKBACK_DAYS = 35  # Fetch 35 calendar days to ensure >= 30 trading-day bars
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 helpers — candidate generation
+# ---------------------------------------------------------------------------
+
+def _get_alpaca_candidates(top: int = 25) -> set[str]:
+    """
+    Pull most-actives + top gainers + top losers from Alpaca ScreenerClient.
+    Uses the market-data API keys (same pair as StockHistoricalDataClient).
+    """
+    tickers: set[str] = set()
+    try:
+        client = ScreenerClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
+
+        # Most active by volume
+        actives = client.get_most_actives(
+            MostActivesRequest(top=top, by=MostActivesBy.VOLUME)
+        )
+        for s in actives.most_actives:
+            tickers.add(s.symbol)
+
+        # Top movers — gainers and losers
+        movers = client.get_market_movers(
+            MarketMoversRequest(top=top // 2, market_type=MarketType.STOCKS)
+        )
+        for m in movers.gainers:
+            tickers.add(m.symbol)
+        for m in movers.losers:
+            tickers.add(m.symbol)
+
+        logger.info("Alpaca screener: %d raw candidates", len(tickers))
+    except Exception as exc:
+        logger.warning("Alpaca ScreenerClient failed: %s", exc)
+
+    return tickers
+
+
+def _get_yfinance_candidates() -> set[str]:
+    """
+    Pull day_gainers and most_actives from yfinance predefined screeners.
+    No API key required.
+    """
+    tickers: set[str] = set()
+    for screen_name in ("day_gainers", "most_actives"):
+        try:
+            result = yf.screen(screen_name, count=25)
+            for q in result.get("quotes", []):
+                sym = q.get("symbol")
+                if sym:
+                    tickers.add(sym)
+            logger.info("yfinance '%s': %d tickers", screen_name, len(result.get("quotes", [])))
+        except Exception as exc:
+            logger.warning("yfinance screen '%s' failed: %s", screen_name, exc)
+
+    return tickers
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — filter and rank by RVOL using Alpaca bar data
+# ---------------------------------------------------------------------------
+
+def _filter_and_rank(symbols: list[str]) -> list[str]:
+    """
+    Batch-fetch daily bars for all candidates (one Alpaca API call), then:
+      - Compute price (last bar close) and RVOL (today vs 30-day avg volume)
+      - Drop: price < MIN_PRICE or RVOL < MIN_RVOL
+      - Sort by RVOL descending, cap at MAX_CANDIDATES
+
+    Returns a list of ticker symbols.
+    """
+    if not symbols:
+        return []
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=_BAR_LOOKBACK_DAYS)
+
+    try:
+        data_client = StockHistoricalDataClient(
+            api_key=ALPACA_API_KEY,
+            secret_key=ALPACA_SECRET_KEY,
+        )
+        bars_df = data_client.get_stock_bars(
+            StockBarsRequest(
+                symbol_or_symbols=symbols,
+                timeframe=TimeFrame.Day,
+                start=start,
+                end=end,
+            )
+        ).df  # MultiIndex DataFrame: (symbol, timestamp)
+    except Exception as exc:
+        logger.error("Alpaca bar fetch failed in screener filter: %s — passing through raw list.", exc)
+        return symbols[:MAX_CANDIDATES]
+
+    scored: list[tuple[str, float]] = []
+
+    for sym in symbols:
+        try:
+            sym_bars = bars_df.xs(sym, level="symbol")
+
+            if len(sym_bars) < 5:
+                continue  # Not enough history to compute a reliable avg
+
+            price = float(sym_bars["close"].iloc[-1])
+            if price < MIN_PRICE:
+                continue
+
+            # RVOL: today (last bar) vs mean of all prior bars in the window
+            avg_vol = float(sym_bars["volume"].iloc[:-1].mean())
+            today_vol = float(sym_bars["volume"].iloc[-1])
+
+            if avg_vol <= 0:
+                continue
+
+            rvol = today_vol / avg_vol
+            if rvol < MIN_RVOL:
+                continue
+
+            scored.append((sym, rvol))
+
+        except (KeyError, IndexError):
+            continue  # Symbol sparse or missing from Alpaca response
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    final = [sym for sym, _ in scored[:MAX_CANDIDATES]]
+
+    logger.info(
+        "Screener filter (price>=%.0f, RVOL>=%.1fx): %d/%d passed → %s",
+        MIN_PRICE, MIN_RVOL, len(final), len(symbols), final,
+    )
+    return final
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def get_dynamic_watchlist() -> list[str]:
+    """
+    Build and return a dynamic list of up to MAX_CANDIDATES tickers for the PM agent.
+
+    Pipeline:
+      1. Alpaca ScreenerClient  — most-actives + top movers
+      2. yfinance               — day_gainers + most_actives
+      3. Union and deduplicate
+      4. Filter by price >= $5 and RVOL >= 1.5x using Alpaca daily bars
+      5. Sort by RVOL descending, cap at MAX_CANDIDATES
+      6. Fall back to STATIC_WATCHLIST if result is empty
+
+    Returns:
+        list[str]: Ticker symbols ready for analysis.
+    """
+    logger.info("=== Dynamic Screener: generating watchlist ===")
+
+    # Stage 1 — gather raw candidates from all sources
+    raw: set[str] = _get_alpaca_candidates(top=25) | _get_yfinance_candidates()
+    logger.info("Combined raw candidates: %d unique symbols", len(raw))
+
+    if not raw:
+        logger.warning("All screener sources returned 0 candidates — using static WATCHLIST.")
+        return list(STATIC_WATCHLIST)
+
+    # Stage 2 — filter and rank
+    filtered = _filter_and_rank(list(raw))
+
+    if not filtered:
+        logger.warning(
+            "All %d candidates failed price/RVOL filters — using static WATCHLIST.", len(raw)
+        )
+        return list(STATIC_WATCHLIST)
+
+    logger.info("=== Dynamic Screener complete: %d tickers ===", len(filtered))
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# CLI — run screener standalone for testing
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import logging as _logging
+
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    )
+    candidates = get_dynamic_watchlist()
+    print(f"\n{'='*50}")
+    print(f"  Dynamic Watchlist ({len(candidates)} tickers)")
+    print(f"{'='*50}")
+    for t in candidates:
+        print(f"  {t}")
+    print(f"{'='*50}\n")
