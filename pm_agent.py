@@ -6,6 +6,7 @@ from agno.models.openai import OpenAIChat
 from agno.tools import tool
 from alpaca.trading.client import TradingClient
 from datetime import datetime, timezone
+from typing import Optional
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.common.exceptions import APIError
@@ -468,69 +469,47 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
 @tool(show_result=True)
 def log_trade_signals(
     ticker: str,
-    overall_signal: str = "",
-    signal_confidence: str = "",
-    rsi_value: float = 0.0,
-    rsi_signal: str = "",
-    momentum_pct: float = 0.0,
-    momentum_signal: str = "",
-    macd_crossover: str = "",
-    price_vs_sma_20: str = "",
-    price_vs_sma_50: str = "",
-    price_vs_vwap: str = "",
-    adx_value: float = 0.0,
-    adx_direction: str = "",
-    bb_signal: str = "",
-    bb_squeeze: bool = False,
-    bb_percent_b: float = 0.0,
-    obv_trend: str = "",
-    obv_divergence: str = "",
-    stoch_signal: str = "",
-    rsi_divergence: str = "",
-    macd_divergence: str = "",
-    reversal_alert: str = "",
-    reversal_factors: str = "",
-    technical_price: float = 0.0,
-    fundamental_score: int = 0,
-    fundamental_key_metric: str = "",
-    news_sentiment: str = "",
-    critical_risk: bool = False,
-    news_summary: str = "",
+    # Technical — core signals
+    overall_signal: Optional[str] = None,
+    signal_confidence: Optional[str] = None,
+    rsi_value: Optional[float] = None,
+    rsi_signal: Optional[str] = None,
+    momentum_pct: Optional[float] = None,
+    macd_crossover: Optional[str] = None,
+    adx_value: Optional[float] = None,
+    bb_squeeze: Optional[bool] = None,
+    reversal_alert: Optional[str] = None,
+    technical_price: Optional[float] = None,
+    # Fundamental
+    fundamental_score: Optional[int] = None,
+    fundamental_key_metric: Optional[str] = None,
+    # News
+    news_sentiment: Optional[str] = None,
+    critical_risk: Optional[bool] = None,
+    news_summary: Optional[str] = None,
 ) -> str:
     """
     Log signal attribution data for the most recent trade decision on this ticker.
     Call this AFTER send_n8n_notification to attach signal data for performance analysis.
+    All fields except ticker are optional — pass None for any value not available.
 
     Args:
-        ticker: The stock ticker this signal data belongs to.
+        ticker: The stock ticker this signal data belongs to (required).
         overall_signal: Technical overall signal (Bullish/Bearish/Neutral).
-        signal_confidence: Signal confidence from ADX (High/Moderate/Low).
+        signal_confidence: Signal confidence derived from ADX (High/Moderate/Low).
         rsi_value: RSI-14 numeric value.
         rsi_signal: RSI interpretation (Oversold/Overbought/Neutral).
         momentum_pct: 10-day ROC percentage.
-        momentum_signal: Momentum interpretation (Positive/Negative).
-        macd_crossover: MACD crossover status (Bullish/Bearish).
-        price_vs_sma_20: Price vs SMA-20 (Above/Below).
-        price_vs_sma_50: Price vs SMA-50 (Above/Below).
-        price_vs_vwap: Price vs VWAP-20 (Above/Below).
+        macd_crossover: MACD crossover status (Bullish/Bearish/None).
         adx_value: ADX numeric value.
-        adx_direction: ADX directional bias (Bullish/Bearish).
-        bb_signal: Bollinger Band signal (Overbought/Oversold/Neutral).
-        bb_squeeze: Whether BB squeeze is active.
-        bb_percent_b: BB %B numeric value.
-        obv_trend: OBV trend (Rising/Falling).
-        obv_divergence: OBV divergence (Bullish/Bearish/None).
-        stoch_signal: Stochastic signal (Overbought/Oversold/Neutral).
-        rsi_divergence: RSI divergence status.
-        macd_divergence: MACD divergence status.
-        reversal_alert: Reversal alert status.
-        reversal_factors: Comma-separated reversal factors.
-        technical_price: Price from the Technical Analyst.
-        fundamental_score: Fundamental score (1-10).
-        fundamental_key_metric: Key metric driving the score.
+        bb_squeeze: True if a Bollinger Band squeeze is active.
+        reversal_alert: Reversal alert (Potential Bearish Reversal/Potential Bullish Reversal/None).
+        technical_price: Price from the Technical Analyst report.
+        fundamental_score: Fundamental score integer (1-10).
+        fundamental_key_metric: Key metric driving the fundamental score.
         news_sentiment: News sentiment (Positive/Negative/Neutral/Mixed).
-        critical_risk: Whether a critical risk event was flagged.
-        news_summary: News summary text.
+        critical_risk: True if CRITICAL_RISK: YES was flagged by the news analyst.
+        news_summary: Brief news summary from the Market News Analyst.
     Returns:
         str: Confirmation that signals were logged.
     """
@@ -551,34 +530,21 @@ def log_trade_signals(
 
         SignalSnapshot.create(
             decision=decision,
-            overall_signal=overall_signal or None,
-            signal_confidence=signal_confidence or None,
-            rsi_value=rsi_value if rsi_value != 0.0 else None,
-            rsi_signal=rsi_signal or None,
-            momentum_pct=momentum_pct if momentum_pct != 0.0 else None,
-            momentum_signal=momentum_signal or None,
-            macd_crossover=macd_crossover or None,
-            price_vs_sma_20=price_vs_sma_20 or None,
-            price_vs_sma_50=price_vs_sma_50 or None,
-            price_vs_vwap=price_vs_vwap or None,
-            adx_value=adx_value if adx_value != 0.0 else None,
-            adx_direction=adx_direction or None,
-            bb_signal=bb_signal or None,
+            overall_signal=overall_signal,
+            signal_confidence=signal_confidence,
+            rsi_value=rsi_value,
+            rsi_signal=rsi_signal,
+            momentum_pct=momentum_pct,
+            macd_crossover=macd_crossover,
+            adx_value=adx_value,
             bb_squeeze=bb_squeeze,
-            bb_percent_b=bb_percent_b if bb_percent_b != 0.0 else None,
-            obv_trend=obv_trend or None,
-            obv_divergence=obv_divergence or None,
-            stoch_signal=stoch_signal or None,
-            rsi_divergence=rsi_divergence or None,
-            macd_divergence=macd_divergence or None,
-            reversal_alert=reversal_alert or None,
-            reversal_factors=reversal_factors or None,
-            technical_price=technical_price if technical_price != 0.0 else None,
-            fundamental_score=fundamental_score if fundamental_score != 0 else None,
-            fundamental_key_metric=fundamental_key_metric or None,
-            news_sentiment=news_sentiment or None,
+            reversal_alert=reversal_alert,
+            technical_price=technical_price,
+            fundamental_score=fundamental_score,
+            fundamental_key_metric=fundamental_key_metric,
+            news_sentiment=news_sentiment,
             critical_risk=critical_risk,
-            news_summary=news_summary or None,
+            news_summary=news_summary,
         )
 
         return f"Signal attribution logged for {ticker} (decision #{decision.id})."

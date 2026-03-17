@@ -154,25 +154,18 @@ PM_INSTRUCTIONS = [
     # --- Phase 6 ---
     "### Phase 6: Trade Journal Logging",
     (
-        "After Phase 5 (Notification), call 'log_trade_signals' to record the signal "
+        "After Phase 5 (Notification), call 'log_trade_signals' to record signal "
         "attribution data for this decision. This enables per-signal performance analysis.\n\n"
 
-        "You MUST pass ALL of the following fields from your Phase 1 investigation:\n"
-        "  - ticker: the stock symbol\n"
+        "Pass the following fields — all are optional except ticker. "
+        "Pass None for any field that is unavailable; never pass an empty string.\n"
+        "  - ticker: the stock symbol (required)\n"
         "  - From the Technical Analyst: overall_signal, signal_confidence, rsi_value, "
-        "rsi_signal, momentum_pct, momentum_signal, macd_crossover, price_vs_sma_20, "
-        "price_vs_sma_50, price_vs_vwap, adx_value, adx_direction, bb_signal, bb_squeeze, "
-        "bb_percent_b, obv_trend, obv_divergence, stoch_signal, rsi_divergence, "
-        "macd_divergence, reversal_alert, reversal_factors, technical_price (the price "
-        "field from the Technical Analyst report)\n"
-        "  - From the Fundamental Analyst: fundamental_score (the integer 1-10), "
-        "fundamental_key_metric (the main metric cited in the justification)\n"
-        "  - From the Market News Analyst: news_sentiment (Positive/Negative/Neutral/Mixed), "
-        "critical_risk (True if CRITICAL_RISK: YES, False otherwise), "
-        "news_summary (the NEWS_SUMMARY text)\n\n"
-
-        "Use the EXACT values from each agent's report — do not round, interpret, or modify them. "
-        "If any value is unavailable, pass an empty string or 0.\n\n"
+        "rsi_signal, momentum_pct, macd_crossover, adx_value, bb_squeeze, "
+        "reversal_alert, technical_price\n"
+        "  - From the Fundamental Analyst: fundamental_score, fundamental_key_metric\n"
+        "  - From the Market News Analyst: news_sentiment, "
+        "critical_risk (True/False), news_summary\n\n"
 
         "This step is non-blocking: if it fails, the trade decision and notification "
         "from Phases 4-5 are unaffected."
