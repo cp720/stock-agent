@@ -14,9 +14,9 @@
 
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
-from agno.tools.duckduckgo import DuckDuckGoTools
 from config import OPENAI_API_KEY
 from instructions.news_instructions import NEWS_INSTRUCTIONS
+from news_tools import StockNewsTools
 
 model = OpenAIChat(id="gpt-4.1", temperature=0.2, api_key=OPENAI_API_KEY)
 
@@ -29,7 +29,7 @@ market_news_analyst_agent = Agent(
         "an immediate SELL override in the trading decision."
     ),
     model=model,
-    tools=[DuckDuckGoTools()],
+    tools=[StockNewsTools()],
     instructions=NEWS_INSTRUCTIONS,
     markdown=True,
 )
