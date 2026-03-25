@@ -57,6 +57,7 @@ class StockNewsTools(Toolkit):
         """
         try:
             raw = yf.Ticker(ticker).get_news(count=max_results)
+            raw = raw[:max_results]   # defensive cap — yfinance may return more than count
             results = []
             for item in raw:
                 content = item.get("content", {})
