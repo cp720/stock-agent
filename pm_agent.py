@@ -1,5 +1,5 @@
-import requests
-from config import ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, OPENAI_API_KEY, N8N_WEBHOOK_URL
+import time
+from config import ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, OPENAI_API_KEY
 from agno.agent import Agent
 from agno.team import Team
 from agno.models.openai import OpenAIChat
@@ -14,7 +14,7 @@ from fundamental_analyst import fundamental_analyst_agent
 from technical_analyst import technical_analyst_agent
 from market_news_analyst import market_news_analyst_agent
 from instructions.pm_instructions import PM_INSTRUCTIONS
-from screener import get_dynamic_watchlist
+from watchlist import WATCHLIST
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,9 +37,9 @@ alpaca_trading_client = TradingClient(ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET,
 MAX_POSITION_PCT = 0.15       # No single position > 15% of total equity
 MAX_DAILY_TRADES = 10         # Max 10 executed trades per calendar day
 
-# --- Notification Tool ---
+# --- Save Recommendation Tool ---
 @tool(show_result=True)
-def send_n8n_notification(
+def save_recommendation(
     ticker: str,
     action: str,
     quantity: int,
@@ -51,8 +51,7 @@ def send_n8n_notification(
     execution_note: str = ""
 ):
     """
-    REQUIRED FINAL STEP: Use this tool to send the trade alert notification.
-    This is the only way the user receives the trade recommendation and execution result.
+    REQUIRED FINAL STEP: Save the trade recommendation and execution result to the journal.
     You MUST call this for every recommendation, including HOLD.
 
     Args:
@@ -67,27 +66,9 @@ def send_n8n_notification(
         filled_price (str): The actual fill price if the trade was executed. Empty string otherwise.
         execution_note (str): Reason for skip or failure, or confirmation of execution.
     Returns:
-        str: A confirmation message indicating the notification was sent.
+        str: A confirmation message indicating the recommendation was saved.
     """
-    payload = {
-        "ticker": ticker,
-        "action": action,
-        "quantity": quantity,
-        "thesis": thesis,
-        "in_portfolio": in_portfolio,
-        "execution_status": execution_status,
-        "order_id": order_id,
-        "filled_price": filled_price,
-        "execution_note": execution_note,
-        "timestamp": datetime.now().isoformat()
-    }
-
-    try:
-        response = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        webhook_result = f"Successfully sent {action} recommendation for {ticker} to n8n."
-    except Exception as e:
-        webhook_result = f"Failed to send notification: {str(e)}"
+    webhook_result = f"Recommendation saved: {action} {ticker} (status: {execution_status})."
 
     # --- Auto-log trade decision to journal ---
     if JOURNAL_ENABLED:
@@ -155,6 +136,7 @@ def send_n8n_notification(
             logger.error("Failed to log trade decision: %s", e)
 
     return webhook_result
+
 
 # --- Alpaca account tools ---
 
@@ -559,7 +541,7 @@ trading_team = Team(
     name="Portfolio Management Team",
     role="Chief Investment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
     members=[fundamental_analyst_agent, technical_analyst_agent, market_news_analyst_agent],
-    tools=[send_n8n_notification, get_account_balance, get_portfolio_positions, get_portfolio_risk_assessment, execute_trade, log_trade_signals],
+    tools=[save_recommendation, get_account_balance, get_portfolio_positions, get_portfolio_risk_assessment, execute_trade, log_trade_signals],
     model=OpenAIChat(id="gpt-4.1", temperature=0.3, api_key=OPENAI_API_KEY),
     add_member_tools_to_context=True,
     add_datetime_to_context=True,
@@ -588,21 +570,53 @@ def ask(question: str):
     trading_team.print_response(question, stream=True)
 
 
+_INTER_TICKER_DELAY = 20   # seconds between tickers — prevents TPM buildup
+_MAX_RETRIES = 3           # retry attempts on rate limit before skipping
+_RETRY_BASE_DELAY = 60     # seconds; multiplied by attempt number (60s, 120s, 180s)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "429" in s or "rate_limit" in s or "rate limit" in s
+
+
 def run_watchlist():
-    """Run the dynamic screener, then analyze each candidate sequentially."""
-    watchlist = get_dynamic_watchlist()
+    """Analyze each ticker in watchlist.py sequentially with rate-limit safeguards."""
+    watchlist = WATCHLIST
     logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(watchlist))
 
-    for ticker in watchlist:
+    for i, ticker in enumerate(watchlist):
+        if i > 0:
+            logger.info("Pausing %ds before next ticker to stay within TPM limits ...", _INTER_TICKER_DELAY)
+            time.sleep(_INTER_TICKER_DELAY)
+
         logger.info("Analyzing %s ...", ticker)
-        try:
-            trading_team.print_response(
-                f"Analyze {ticker}. Should I buy, sell, or hold?",
-                stream=True
-            )
-            logger.info("Completed analysis for %s.", ticker)
-        except Exception as e:
-            logger.error("Failed to analyze %s: %s", ticker, e)
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                trading_team.print_response(
+                    f"Analyze {ticker}. Should I buy, sell, or hold?",
+                    stream=True
+                )
+                logger.info("Completed analysis for %s.", ticker)
+                break
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    if attempt < _MAX_RETRIES:
+                        wait = _RETRY_BASE_DELAY * attempt
+                        logger.warning(
+                            "Rate limit hit for %s (attempt %d/%d) — retrying in %ds.",
+                            ticker, attempt, _MAX_RETRIES, wait
+                        )
+                        time.sleep(wait)
+                    else:
+                        logger.error(
+                            "Rate limit persisted after %d attempts for %s — skipping.",
+                            _MAX_RETRIES, ticker
+                        )
+                else:
+                    logger.error("Failed to analyze %s: %s", ticker, e)
+                    break
 
     logger.info("=== Watchlist Scan Complete ===")
 

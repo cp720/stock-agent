@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "WebFetch(domain:docs.alpaca.markets)",
+      "Bash(\"/c/Users/chamu/Agent Project/venv_agent/Scripts/python.exe\" -c \":*)",
+      "Bash(find 'C:\\\\Users\\\\chamu\\\\Agent Project' -type f \\\\\\(-name test_*.py -o -name *_test.py -o -name conftest.py -o -name pytest.ini \\\\\\))"
     ]
   }
 }

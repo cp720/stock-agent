@@ -13,7 +13,6 @@ ALPACA_TRADING_KEY = os.getenv("ALPACA_TRADING_API_KEY")
 ALPACA_TRADING_SECRET = os.getenv("ALPACA_TRADING_SECRET")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
 
 # --- Validate required environment variables ---
 _REQUIRED_VARS = {
@@ -22,7 +21,6 @@ _REQUIRED_VARS = {
     "ALPACA_TRADING_API_KEY": ALPACA_TRADING_KEY,
     "ALPACA_TRADING_SECRET": ALPACA_TRADING_SECRET,
     "OPENAI_API_KEY": OPENAI_API_KEY,
-    "N8N_WEBHOOK_URL": N8N_WEBHOOK_URL,
 }
 
 _missing = [k for k, v in _REQUIRED_VARS.items() if not v]

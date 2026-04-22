@@ -3,7 +3,8 @@ import sys
 import numpy as np
 import pandas as pd
 import peewee as pw
-from datetime import datetime
+import yfinance as yf
+from datetime import datetime, timedelta, timezone
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -456,6 +457,110 @@ def report_decisions(limit: int = 20):
               f"status={d.execution_status:8s}  price={fp}")
 
 
+def report_recommendation_performance(days: int = 7):
+    """Compare past recommendations to actual stock performance.
+
+    For each decision in the last `days` days, fetches the current price via
+    yFinance and computes the return since the recommendation. Uses the
+    Technical Analyst's price (SignalSnapshot.technical_price) as the reference,
+    falling back to filled_price for executed trades.
+    """
+    initialize_db()
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    decisions = list(
+        TradeDecision
+        .select()
+        .where(TradeDecision.timestamp >= since)
+        .order_by(TradeDecision.timestamp.asc())
+    )
+
+    if not decisions:
+        print(f"No decisions in the last {days} days.")
+        return
+
+    # Bulk-load signal snapshots for reference prices
+    decision_ids = [d.id for d in decisions]
+    signals_by_id = {
+        s.decision_id: s
+        for s in SignalSnapshot.select().where(SignalSnapshot.decision_id.in_(decision_ids))
+    }
+
+    # Build records with reference price
+    records = []
+    for d in decisions:
+        sig = signals_by_id.get(d.id)
+        ref_price = d.filled_price
+        if ref_price is None and sig and sig.technical_price:
+            ref_price = sig.technical_price
+        records.append({
+            "timestamp": d.timestamp,
+            "ticker": d.ticker,
+            "action": d.action,
+            "ref_price": ref_price,
+        })
+
+    # Fetch current prices via yFinance (one call per unique ticker)
+    unique_tickers = list({r["ticker"] for r in records})
+    current_prices = {}
+    for ticker in unique_tickers:
+        try:
+            current_prices[ticker] = yf.Ticker(ticker).fast_info.last_price
+        except Exception:
+            current_prices[ticker] = None
+
+    # --- Print table ---
+    print(f"\nRECOMMENDATION PERFORMANCE — Last {days} Days")
+    print("=" * 82)
+    print(f"  {'Date':10s}  {'Ticker':6s}  {'Action':5s}  "
+          f"{'Ref $':>8s}  {'Now $':>8s}  {'Return':>8s}  {'Result':>12s}")
+    print("-" * 82)
+
+    buy_sell_results = []
+
+    for r in records:
+        ticker = r["ticker"]
+        cur = current_prices.get(ticker)
+        ref = r["ref_price"]
+
+        if ref and cur:
+            ret_pct = (cur - ref) / ref * 100
+            if r["action"] == "BUY":
+                correct = "Correct" if ret_pct > 0 else "Wrong"
+                buy_sell_results.append((r["action"], ret_pct, correct))
+            elif r["action"] == "SELL":
+                correct = "Correct" if ret_pct < 0 else "Wrong"
+                buy_sell_results.append((r["action"], ret_pct, correct))
+            else:
+                correct = "N/A (HOLD)"
+            ref_str = f"${ref:.2f}"
+            cur_str = f"${cur:.2f}"
+            ret_str = f"{ret_pct:+.1f}%"
+        else:
+            ref_str = cur_str = ret_str = "N/A"
+            correct = "N/A"
+
+        print(f"  {r['timestamp']:%Y-%m-%d}  {ticker:6s}  {r['action']:5s}  "
+              f"{ref_str:>8s}  {cur_str:>8s}  {ret_str:>8s}  {correct:>12s}")
+
+    # --- Summary stats ---
+    print("=" * 82)
+    if buy_sell_results:
+        n = len(buy_sell_results)
+        n_correct = sum(1 for _, _, c in buy_sell_results if c == "Correct")
+        accuracy = n_correct / n * 100
+        avg_ret = sum(r for _, r, _ in buy_sell_results) / n
+        buy_rets = [r for a, r, _ in buy_sell_results if a == "BUY"]
+        sell_rets = [r for a, r, _ in buy_sell_results if a == "SELL"]
+        print(f"  BUY/SELL accuracy:  {n_correct}/{n} ({accuracy:.0f}%)")
+        print(f"  Avg return (all):   {avg_ret:+.1f}%")
+        if buy_rets:
+            print(f"  Avg return (BUY):   {sum(buy_rets)/len(buy_rets):+.1f}%")
+        if sell_rets:
+            print(f"  Avg return (SELL):  {sum(sell_rets)/len(sell_rets):+.1f}%")
+    print("=" * 82)
+
+
 def report_open_positions():
     """Print currently open positions tracked by the journal."""
     initialize_db()
@@ -481,7 +586,7 @@ def report_open_positions():
 # ---------------------------------------------------------------------------
 
 def main():
-    """CLI: python trade_journal.py [report|decisions|signals|positions|all]"""
+    """CLI: python trade_journal.py [report|decisions|signals|positions|performance|all]"""
     command = sys.argv[1] if len(sys.argv) > 1 else "report"
 
     if command == "report":
@@ -494,14 +599,18 @@ def main():
         report_signal_performance()
     elif command == "positions":
         report_open_positions()
+    elif command == "performance":
+        days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
+        report_recommendation_performance(days)
     elif command == "all":
         report_summary()
         report_by_ticker()
         report_signal_performance()
         report_decisions()
         report_open_positions()
+        report_recommendation_performance()
     else:
-        print("Usage: python trade_journal.py [report|decisions|signals|positions|all]")
+        print("Usage: python trade_journal.py [report|decisions|signals|positions|performance|all]")
 
 
 if __name__ == "__main__":

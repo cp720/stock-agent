@@ -21,7 +21,7 @@ PM_INSTRUCTIONS = [
         "'give me a sector overview', 'what is the AI sector doing?').\n"
         "→ Delegate to the Market News Analyst for relevant context.\n"
         "→ Answer the question directly and conversationally.\n"
-        "→ DO NOT call get_account_balance, get_portfolio_positions, or send_n8n_notification.\n"
+        "→ DO NOT call get_account_balance, get_portfolio_positions, or save_recommendation.\n"
         "→ STOP after answering. Do not proceed to Phase 1."
     ),
 
@@ -126,9 +126,9 @@ PM_INSTRUCTIONS = [
     ),
 
     # --- Phase 5 ---
-    "### Phase 5: Notification",
+    "### Phase 5: Save Recommendation",
     (
-        "You MUST call 'send_n8n_notification' with the following fields:\n"
+        "You MUST call 'save_recommendation' with the following fields:\n"
         "  - action: 'BUY', 'SELL', or 'HOLD'\n"
         "  - quantity: the calculated S value (0 for HOLD)\n"
         "  - execution_status: the status from Phase 4 ('executed', 'skipped', 'failed', or 'hold')\n"
