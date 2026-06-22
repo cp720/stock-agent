@@ -1,11 +1,19 @@
 import time
-from config import ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, OPENAI_API_KEY
+import pandas_ta as ta
+from config import (
+    ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET,
+    ALPACA_API_KEY, ALPACA_SECRET_KEY, OPENAI_API_KEY,
+)
 from agno.agent import Agent
 from agno.team import Team
 from agno.models.openai import OpenAIChat
 from agno.tools import tool
 from alpaca.trading.client import TradingClient
-from datetime import datetime, timezone
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
@@ -33,15 +41,29 @@ except ImportError:
 # initialize Alpaca trading client
 alpaca_trading_client = TradingClient(ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET, paper=True)
 
+# market-data client (used by exit management to compute ATR for volatility-adaptive stops)
+alpaca_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+
 # --- Trade Execution Safeguards ---
 MAX_POSITION_PCT = 0.15       # No single position > 15% of total equity
 MAX_DAILY_TRADES = 10         # Max 10 executed trades per calendar day
 
 # --- Exit Management Rules (applied mechanically by manage_exits) ---
-STOP_LOSS_PCT = 0.08            # Hard stop: exit if down 8% from entry
-TAKE_PROFIT_PCT = 0.20         # Exit if up 20% from entry
+TAKE_PROFIT_PCT = 0.20         # Exit if up 20% from entry (profit target — not volatility-scaled)
 TRAILING_ACTIVATION_PCT = 0.10 # Begin trailing once the position is up 10% from entry
-TRAILING_STOP_PCT = 0.08       # Once trailing, exit if price falls 8% from the high-water mark
+
+# Stop distances adapt to each stock's volatility via ATR (Average True Range).
+# stop distance = ATR_*_MULT × ATR, expressed as a % of price, then bounded by the
+# floor/ceiling below so a quiet name isn't stopped on noise and a wild name isn't
+# given an unbounded stop. STOP_LOSS_PCT / TRAILING_STOP_PCT are the fallbacks used
+# when ATR cannot be computed (e.g. data error, insufficient history).
+ATR_PERIOD = 14                # ATR lookback (trading days)
+ATR_STOP_MULT = 2.5            # Hard stop at entry − 2.5 × ATR
+ATR_TRAIL_MULT = 2.5           # Trailing stop at high-water mark − 2.5 × ATR
+ATR_STOP_MIN_PCT = 0.05        # Stop never tighter than 5% of price
+ATR_STOP_MAX_PCT = 0.15        # Stop never wider than 15% of price
+STOP_LOSS_PCT = 0.08           # Fallback hard stop when ATR is unavailable
+TRAILING_STOP_PCT = 0.08       # Fallback trailing stop when ATR is unavailable
 
 # --- Save Recommendation Tool ---
 @tool(show_result=True)
@@ -548,6 +570,36 @@ def log_trade_signals(
 
 # --- Exit Management (mechanical, runs outside the agent flow) ---
 
+def _get_atr(ticker: str, period: int = ATR_PERIOD) -> Optional[float]:
+    """Return the latest ATR (Average True Range) for a ticker, or None if unavailable.
+
+    ATR measures recent price volatility in dollar terms. It is used to scale stop
+    distances to each stock's character rather than applying a flat percentage to all.
+    """
+    try:
+        end = datetime.now(timezone.utc)
+        # ~4× the period in calendar days gives enough trading bars for the EMA warm-up.
+        start = end - timedelta(days=period * 4 + 15)
+        bars = alpaca_data_client.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=[ticker], timeframe=TimeFrame.Day,
+            start=start, end=end, adjustment='split', feed=DataFeed.IEX))
+        df = bars.df
+        if df is None or df.empty:
+            return None
+        df = df.loc[ticker]
+        atr_series = ta.atr(df['high'], df['low'], df['close'], length=period)
+        if atr_series is None:
+            return None
+        atr_series = atr_series.dropna()
+        if atr_series.empty:
+            return None
+        atr = float(atr_series.iloc[-1])
+        return atr if atr > 0 else None
+    except Exception as e:
+        logger.warning("ATR computation failed for %s: %s — falling back to fixed-%% stops.", ticker, e)
+        return None
+
+
 def _update_high_water_mark(ticker: str, current_price: float) -> float:
     """Persist the running peak price across a ticker's open lots and return that peak.
 
@@ -658,15 +710,29 @@ def manage_exits():
         peak = _update_high_water_mark(ticker, current)
         gain = (current - entry) / entry
 
+        # Derive volatility-adaptive stop distances from ATR, bounded and with a
+        # fixed-percentage fallback when ATR can't be computed.
+        atr = _get_atr(ticker)
+        if atr is not None:
+            atr_pct = atr / current
+            stop_pct = min(max(ATR_STOP_MULT * atr_pct, ATR_STOP_MIN_PCT), ATR_STOP_MAX_PCT)
+            trail_pct = min(max(ATR_TRAIL_MULT * atr_pct, ATR_STOP_MIN_PCT), ATR_STOP_MAX_PCT)
+            stop_basis = f"ATR ${atr:.2f}={atr_pct * 100:.1f}%/px × {ATR_STOP_MULT} → {stop_pct * 100:.1f}% stop"
+        else:
+            stop_pct = STOP_LOSS_PCT
+            trail_pct = TRAILING_STOP_PCT
+            stop_basis = f"fixed {stop_pct * 100:.0f}% stop (ATR unavailable)"
+
         reason = None
-        if gain <= -STOP_LOSS_PCT:
-            reason = f"stop-loss ({gain * 100:+.1f}% from entry ${entry:.2f})"
+        if gain <= -stop_pct:
+            reason = f"stop-loss ({gain * 100:+.1f}% from entry ${entry:.2f}; {stop_basis})"
         elif gain >= TAKE_PROFIT_PCT:
             reason = f"take-profit ({gain * 100:+.1f}% from entry ${entry:.2f})"
         elif ((peak - entry) / entry >= TRAILING_ACTIVATION_PCT
-              and current <= peak * (1 - TRAILING_STOP_PCT)):
+              and current <= peak * (1 - trail_pct)):
             drop = (current - peak) / peak
-            reason = f"trailing-stop ({drop * 100:+.1f}% from peak ${peak:.2f})"
+            reason = (f"trailing-stop ({drop * 100:+.1f}% from peak ${peak:.2f}; "
+                      f"{trail_pct * 100:.1f}% trail, {stop_basis})")
 
         if reason is None:
             continue

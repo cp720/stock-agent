@@ -126,9 +126,11 @@ The score is persisted to `signal_snapshots.conviction_score`. Use `python trade
 
 Held positions are managed mechanically by `manage_exits()` in `pm_agent.py`, which runs at the start of every watchlist scan (and standalone via `python pm_agent.py exits`). It is **separate from the discretionary agent flow** and **not subject to the daily trade limit** — risk-reducing exits are never blocked. For each position it applies, in priority order:
 
-- **Stop-loss** — exit if down ≥ 8% from entry (`STOP_LOSS_PCT`)
+- **Stop-loss** — exit if price falls `ATR_STOP_MULT × ATR` below entry (volatility-adaptive)
 - **Take-profit** — exit if up ≥ 20% from entry (`TAKE_PROFIT_PCT`)
-- **Trailing stop** — once up ≥ 10% (`TRAILING_ACTIVATION_PCT`), exit if price falls ≥ 8% (`TRAILING_STOP_PCT`) from the high-water mark
+- **Trailing stop** — once up ≥ 10% (`TRAILING_ACTIVATION_PCT`), exit if price falls `ATR_TRAIL_MULT × ATR` below the high-water mark
+
+**ATR-adaptive stops:** stop distances scale to each stock's volatility instead of a flat percentage. The distance is `multiplier × ATR-14` expressed as a % of price, bounded to `[ATR_STOP_MIN_PCT, ATR_STOP_MAX_PCT]` (5–15%) so quiet names aren't stopped on noise and volatile names aren't given unbounded room. ATR is computed from Alpaca daily bars via the IEX feed (free-tier safe). If ATR can't be computed, the stop falls back to the fixed `STOP_LOSS_PCT` / `TRAILING_STOP_PCT` (8%). Example: KO → ~6.3% stop, AAPL → ~8.8%, TSLA → ~12.3%.
 
 The high-water mark is persisted in `open_positions.high_water_mark`. Exits submit a market SELL and journal through the FIFO `close_oldest_position` path, so closed trades populate the conviction/signal performance reports.
 
