@@ -12,6 +12,7 @@ from instructions.technical_instructions import TECHNICAL_INSTRUCTIONS
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 from logger import get_logger
 
 # --- Technical Analyst Agent ---
@@ -206,7 +207,8 @@ def get_technical_indicators(symbols: List[str]) -> List[TechnicalIndicatorResul
         timeframe=TimeFrame.Day,
         start=start_date,
         end=end_date,
-        adjustment='split'
+        adjustment='split',
+        feed=DataFeed.IEX  # free-tier safe; default SIP feed rejects the most-recent window
     )
 
     bars_response = alpaca_client.get_stock_bars(request_params)
