@@ -37,6 +37,12 @@ alpaca_trading_client = TradingClient(ALPACA_TRADING_KEY, ALPACA_TRADING_SECRET,
 MAX_POSITION_PCT = 0.15       # No single position > 15% of total equity
 MAX_DAILY_TRADES = 10         # Max 10 executed trades per calendar day
 
+# --- Exit Management Rules (applied mechanically by manage_exits) ---
+STOP_LOSS_PCT = 0.08            # Hard stop: exit if down 8% from entry
+TAKE_PROFIT_PCT = 0.20         # Exit if up 20% from entry
+TRAILING_ACTIVATION_PCT = 0.10 # Begin trailing once the position is up 10% from entry
+TRAILING_STOP_PCT = 0.08       # Once trailing, exit if price falls 8% from the high-water mark
+
 # --- Save Recommendation Tool ---
 @tool(show_result=True)
 def save_recommendation(
@@ -451,6 +457,8 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
 @tool(show_result=True)
 def log_trade_signals(
     ticker: str,
+    # Decision synthesis
+    conviction_score: Optional[float] = None,
     # Technical — core signals
     overall_signal: Optional[str] = None,
     signal_confidence: Optional[str] = None,
@@ -472,11 +480,12 @@ def log_trade_signals(
 ) -> str:
     """
     Log signal attribution data for the most recent trade decision on this ticker.
-    Call this AFTER send_n8n_notification to attach signal data for performance analysis.
+    Call this AFTER save_recommendation to attach signal data for performance analysis.
     All fields except ticker are optional — pass None for any value not available.
 
     Args:
         ticker: The stock ticker this signal data belongs to (required).
+        conviction_score: The 0–100 conviction score computed in Phase 3 that drove the action.
         overall_signal: Technical overall signal (Bullish/Bearish/Neutral).
         signal_confidence: Signal confidence derived from ADX (High/Moderate/Low).
         rsi_value: RSI-14 numeric value.
@@ -512,6 +521,7 @@ def log_trade_signals(
 
         SignalSnapshot.create(
             decision=decision,
+            conviction_score=conviction_score,
             overall_signal=overall_signal,
             signal_confidence=signal_confidence,
             rsi_value=rsi_value,
@@ -534,6 +544,143 @@ def log_trade_signals(
     except Exception as e:
         logger.error("Failed to log signals for %s: %s", ticker, e)
         return f"Failed to log signals: {str(e)}"
+
+
+# --- Exit Management (mechanical, runs outside the agent flow) ---
+
+def _update_high_water_mark(ticker: str, current_price: float) -> float:
+    """Persist the running peak price across a ticker's open lots and return that peak.
+
+    The high-water mark drives the trailing stop. It is shared across all open lots of a
+    ticker (the peak the position has reached since the earliest still-open entry).
+    """
+    peak = current_price
+    if not JOURNAL_ENABLED:
+        return peak
+    try:
+        initialize_db()
+        lots = list(OpenPosition.select().where(
+            (OpenPosition.ticker == ticker) & (OpenPosition.status == 'open')))
+        for lot in lots:
+            prior = lot.high_water_mark if lot.high_water_mark else lot.entry_price
+            peak = max(peak, prior)
+        for lot in lots:
+            if (lot.high_water_mark or 0.0) < peak:
+                lot.high_water_mark = peak
+                lot.save()
+    except Exception as e:
+        logger.error("Failed to update high-water mark for %s: %s", ticker, e)
+    return peak
+
+
+def _journal_exit(ticker: str, qty: int, fill_price: Optional[float],
+                  order_id: str, reason: str):
+    """Record an automated exit in the journal, mirroring save_recommendation's writes."""
+    if not JOURNAL_ENABLED:
+        return
+    try:
+        initialize_db()
+        acct_equity = acct_buying_power = acct_cash = None
+        try:
+            account = alpaca_trading_client.get_account()
+            acct_equity = float(account.equity)
+            acct_buying_power = float(account.buying_power)
+            acct_cash = float(account.cash)
+        except Exception:
+            pass
+
+        decision = TradeDecision.create(
+            ticker=ticker,
+            action="SELL",
+            quantity=qty,
+            execution_status="executed",
+            order_id=order_id or "",
+            filled_price=fill_price,
+            filled_qty=qty,
+            execution_note=f"Auto-exit: {reason}",
+            equity=acct_equity,
+            buying_power=acct_buying_power,
+            cash=acct_cash,
+            thesis=f"Automated exit triggered ({reason}). Sold {qty} share(s) of {ticker}.",
+        )
+
+        if fill_price is not None:
+            close_oldest_position(ticker, fill_price, qty, decision)
+
+        if acct_equity is not None:
+            EquitySnapshot.create(
+                equity=acct_equity, cash=acct_cash, buying_power=acct_buying_power,
+            )
+
+        logger.info("Exit journaled: SELL %d %s (%s, id: %d)", qty, ticker, reason, decision.id)
+    except Exception as e:
+        logger.error("Failed to journal exit for %s: %s", ticker, e)
+
+
+def manage_exits():
+    """Mechanical exit pass over all held positions.
+
+    Applies, in priority order: hard stop-loss, take-profit, then trailing stop.
+    Runs independently of the discretionary agent flow and is NOT subject to the daily
+    trade limit — risk-reducing exits should never be blocked. Skipped when the market
+    is closed. Triggered exits submit a market SELL and are logged to the journal.
+    """
+    try:
+        clock = alpaca_trading_client.get_clock()
+    except APIError as e:
+        logger.error("Exit manager: failed to read market clock: %s", e.message)
+        return
+    if not clock.is_open:
+        logger.info("Exit manager: market closed — skipping exit checks.")
+        return
+
+    try:
+        positions = alpaca_trading_client.get_all_positions()
+    except APIError as e:
+        logger.error("Exit manager: failed to fetch positions: %s", e.message)
+        return
+
+    if not positions:
+        logger.info("Exit manager: no open positions to evaluate.")
+        return
+
+    for p in positions:
+        ticker = p.symbol
+        try:
+            qty = int(float(p.qty))
+            entry = float(p.avg_entry_price)
+            current = float(p.current_price)
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0 or entry <= 0 or current <= 0:
+            continue
+
+        peak = _update_high_water_mark(ticker, current)
+        gain = (current - entry) / entry
+
+        reason = None
+        if gain <= -STOP_LOSS_PCT:
+            reason = f"stop-loss ({gain * 100:+.1f}% from entry ${entry:.2f})"
+        elif gain >= TAKE_PROFIT_PCT:
+            reason = f"take-profit ({gain * 100:+.1f}% from entry ${entry:.2f})"
+        elif ((peak - entry) / entry >= TRAILING_ACTIVATION_PCT
+              and current <= peak * (1 - TRAILING_STOP_PCT)):
+            drop = (current - peak) / peak
+            reason = f"trailing-stop ({drop * 100:+.1f}% from peak ${peak:.2f})"
+
+        if reason is None:
+            continue
+
+        logger.info("Exit triggered for %s: %s — submitting SELL %d.", ticker, reason, qty)
+        try:
+            order = alpaca_trading_client.submit_order(MarketOrderRequest(
+                symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY))
+            fill_price = float(order.filled_avg_price) if order.filled_avg_price else current
+            _journal_exit(ticker, qty, fill_price, str(order.id), reason)
+        except APIError as e:
+            logger.error("Exit SELL failed for %s: %s", ticker, e.message)
+        except Exception as e:
+            logger.error("Unexpected error exiting %s: %s", ticker, e)
 
 
 # --- The Team ---
@@ -585,6 +732,10 @@ def run_watchlist():
     watchlist = WATCHLIST
     logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(watchlist))
 
+    # Manage existing positions before evaluating new entries — protect capital first.
+    logger.info("Running exit-management pass on held positions ...")
+    manage_exits()
+
     for i, ticker in enumerate(watchlist):
         if i > 0:
             logger.info("Pausing %ds before next ticker to stay within TPM limits ...", _INTER_TICKER_DELAY)
@@ -622,4 +773,9 @@ def run_watchlist():
 
 
 if __name__ == "__main__":
-    run_watchlist()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "exits":
+        # Run the mechanical exit pass only — no new-entry analysis.
+        manage_exits()
+    else:
+        run_watchlist()

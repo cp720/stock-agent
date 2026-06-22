@@ -67,6 +67,10 @@ class SignalSnapshot(BaseModel):
     decision = pw.ForeignKeyField(TradeDecision, backref='signals',
                                   unique=True, on_delete='CASCADE')
 
+    # Synthesized conviction (0–100) — the PM's blended score that drove the action.
+    # Enables recalibrating the BUY/SELL thresholds from realized P&L by score band.
+    conviction_score = pw.FloatField(null=True)
+
     # Technical signals
     overall_signal = pw.CharField(max_length=20, null=True)
     signal_confidence = pw.CharField(max_length=20, null=True)
@@ -118,6 +122,9 @@ class OpenPosition(BaseModel):
     entry_decision = pw.ForeignKeyField(TradeDecision, backref='opened_positions',
                                         null=True, on_delete='SET NULL')
 
+    # Trailing-stop state — highest price seen since entry (updated by manage_exits)
+    high_water_mark = pw.FloatField(null=True)
+
     # Exit (populated on close)
     exit_date = pw.DateTimeField(null=True)
     exit_price = pw.FloatField(null=True)
@@ -149,11 +156,41 @@ class EquitySnapshot(BaseModel):
 ALL_TABLES = [TradeDecision, SignalSnapshot, OpenPosition, EquitySnapshot]
 
 
+# Columns added after the original schema shipped. create_tables(safe=True) will
+# NOT add columns to a table that already exists, so we ALTER them in on startup.
+_EXPECTED_COLUMNS = {
+    'signal_snapshots': {
+        'conviction_score': 'REAL',
+    },
+    'open_positions': {
+        'high_water_mark': 'REAL',
+    },
+}
+
+
+def _ensure_columns():
+    """Lightweight forward-only migration: add any missing columns to existing tables."""
+    for table, cols in _EXPECTED_COLUMNS.items():
+        try:
+            rows = db.execute_sql(f"PRAGMA table_info({table})").fetchall()
+        except Exception:
+            continue  # table doesn't exist yet — create_tables will build it fresh
+        existing = {row[1] for row in rows}
+        for col, sql_type in cols.items():
+            if col not in existing:
+                try:
+                    db.execute_sql(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}")
+                    logger.info("Migrated trade journal: added %s.%s", table, col)
+                except Exception as e:
+                    logger.error("Failed to add column %s.%s: %s", table, col, e)
+
+
 def initialize_db():
-    """Create tables if they don't exist. Safe to call multiple times."""
+    """Create tables if they don't exist, then apply forward migrations. Safe to call repeatedly."""
     try:
         db.connect(reuse_if_open=True)
         db.create_tables(ALL_TABLES, safe=True)
+        _ensure_columns()
     except Exception as e:
         logger.error("Failed to initialize trade journal DB: %s", e)
 
@@ -390,6 +427,7 @@ def report_signal_performance():
             'reversal_alert': sig.reversal_alert,
             'news_sentiment': sig.news_sentiment,
             'fundamental_score': sig.fundamental_score,
+            'conviction_score': sig.conviction_score,
         })
 
     if not records:
@@ -438,6 +476,26 @@ def report_signal_performance():
         avg = subset['realized_pnl_pct'].mean()
         print(f"    {label:30s}  n={n:3d}  "
               f"Win Rate: {wr:5.1f}%  Avg P&L: {avg:+.1f}%")
+
+    # Conviction score buckets — use this to recalibrate the BUY (≥62) / SELL (≤28) thresholds.
+    # If, say, the 62-69 band shows a poor win rate, raise the BUY threshold; if 45-61 wins
+    # consistently, lower it. This is the feedback loop that tunes Phase 3 from realized results.
+    if df['conviction_score'].notna().any():
+        print(f"\n  conviction_score (buckets):")
+        for low, high, label in [
+            (70, 100, "70-100 (High conviction)"),
+            (62, 69.999, "62-69  (Entry band)"),
+            (45, 61.999, "45-61  (Hold-watch)"),
+            (0, 44.999, "0-44   (Low)"),
+        ]:
+            subset = df[(df['conviction_score'] >= low) & (df['conviction_score'] <= high)]
+            if subset.empty:
+                continue
+            n = len(subset)
+            wr = subset['win'].mean() * 100
+            avg = subset['realized_pnl_pct'].mean()
+            print(f"    {label:30s}  n={n:3d}  "
+                  f"Win Rate: {wr:5.1f}%  Avg P&L: {avg:+.1f}%")
 
 
 def report_decisions(limit: int = 20):

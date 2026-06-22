@@ -51,61 +51,77 @@ PM_INSTRUCTIONS = [
     ),
 
     # --- Phase 3 ---
-    "### Phase 3: Risk-Sizing and Decision",
+    "### Phase 3: Conviction Scoring, Risk-Sizing and Decision",
     (
-        "Using the reports from Phase 1 and account data from Phase 2, determine the recommended action. "
+        "Using the reports from Phase 1 and account data from Phase 2, compute a single "
+        "CONVICTION SCORE (0–100) that blends every signal, then map it to an action. "
         "Use the price reported by the Technical Analyst as P in all formulas "
         "— do NOT fetch or estimate price from any other source.\n\n"
 
-        "Apply the following rules IN ORDER (earlier rules take priority):\n\n"
+        "Do NOT use rigid pass/fail gates. A weak reading in one area lowers conviction; "
+        "it does not by itself veto a trade. Your job is to weigh the evidence, not tick boxes.\n\n"
 
-        "**CRITICAL RISK OVERRIDE — Check this FIRST**\n"
+        "Proceed IN ORDER:\n\n"
+
+        "**STEP A — CRITICAL RISK OVERRIDE (check FIRST, before scoring)**\n"
         "If the Market News Analyst reports CRITICAL_RISK: YES:\n"
-        "  - Set action = SELL regardless of Technical or Fundamental signals.\n"
-        "  - If the stock IS currently held: S = (current_position_value × 0.50) / P\n"
-        "  - If the stock is NOT held: action is SELL (short — we bet on further decline).\n"
-        "  - State the critical risk prominently at the start of the thesis.\n\n"
+        "  - If the stock IS currently held: set action = SELL, S = (current_position_value × 0.50) / P. "
+        "Skip the conviction score entirely.\n"
+        "  - If the stock is NOT held: set action = HOLD with quantity = 0 (we do not short — "
+        "execute_trade blocks it). Flag the stock as 'avoid' in the thesis.\n"
+        "  - State the critical risk prominently at the start of the thesis, then skip to Phase 4.\n\n"
 
-        "**Signal Confidence Gate (from ADX — check before BUY/SELL)**\n"
-        "The Technical Analyst reports a signal_confidence field derived from ADX:\n"
-        "  - High (ADX > 25): Strong trend — act on the technical signal normally.\n"
-        "  - Moderate (ADX 20–25): Forming trend — act, but note the moderate confidence in the thesis.\n"
-        "  - Low (ADX < 20): Ranging/choppy market — treat any technical BUY or SELL signal as HOLD "
-        "unless the Fundamental score independently justifies the action (score > 8 for BUY, "
-        "score < 3 for SELL). State the low-confidence caveat prominently in the thesis.\n\n"
+        "**STEP B — COMPUTE THE CONVICTION SCORE (0–100)**\n"
+        "Add the four components below. Show each number in your reasoning.\n\n"
 
-        "**Portfolio Risk Context (from Phase 2 risk assessment — advisory, not blocking)**\n"
-        "Review the risk_flags from get_portfolio_risk_assessment and adjust your decision:\n"
-        "  - HIGH CONCENTRATION for this ticker → reduce BUY quantity by 50%, or HOLD if already overweight.\n"
-        "  - HEAVY EXPOSURE / LOW CASH → use more conservative sizing (halve the standard BUY formula).\n"
-        "  - PORTFOLIO DRAWDOWN > -10% → strongly favor HOLD over new BUYs; preserve capital.\n"
-        "  - INTRADAY LOSS → note in thesis but do not override multi-day analysis.\n"
-        "  - These are guidelines, not hard rules. Use judgment based on signal strength.\n\n"
+        "  1. Technical component (0–45):\n"
+        "     base = (bullish_votes / 8) × 45   [bullish_votes is the X in the 'X of 8' tally]\n"
+        "     Then multiply 'base' by the signal_confidence multiplier from ADX:\n"
+        "       High (ADX > 25) → ×1.00   |   Moderate (ADX 20–25) → ×0.85   |   Low (ADX < 20) → ×0.60\n"
+        "     technical_component = base × multiplier\n\n"
 
-        "**Reversal Alert Gate — check before BUY**\n"
-        "The Technical Analyst reports a reversal_alert field:\n"
-        "  - 'Potential Bearish Reversal': The trend may be exhausting. If the current action "
-        "would be BUY, DOWNGRADE to HOLD. The reversal factors indicate the rally is losing "
-        "conviction (e.g. RSI divergence, OBV distribution). Include reversal_factors in thesis.\n"
-        "  - 'Potential Bullish Reversal': A bounce may be forming. Note in thesis as context "
-        "but do NOT override a SELL decision — do not catch falling knives. This is informational only.\n"
-        "  - 'None': No reversal signals. Proceed with standard logic.\n\n"
+        "  2. Fundamental component (0–40):\n"
+        "     fundamental_component = (fundamental_score / 10) × 40\n\n"
 
-        "**BUY** — if CRITICAL_RISK is NO, AND Technical is 'Bullish', AND Fundamental score > 7, "
-        "AND signal_confidence is High or Moderate, AND reversal_alert is NOT 'Potential Bearish Reversal':\n"
-        "  - If the stock is NOT currently held: S = (E × 0.10) / P\n"
-        "  - If the stock IS currently held: S = (current_position_value × 0.30) / P\n"
-        "  - Where S = shares to buy, E = total equity, "
-        "P = the price field returned by the Technical Analyst.\n"
-        "  - Cap S so that (S × P) does not exceed available buying power.\n\n"
+        "  3. News adjustment (−15 to +15):\n"
+        "     Positive → +15   |   Mixed → +5   |   Neutral → 0   |   Negative → −15\n\n"
 
-        "**SELL** — if CRITICAL_RISK is NO, AND Technical is 'Bearish', AND Fundamental score < 4, "
-        "AND signal_confidence is High or Moderate:\n"
-        "  - If the stock is currently held: S = (current_position_value × 0.50) / P\n"
-        "  - If the stock is NOT held: action is SELL (short — we bet on further decline).\n\n"
+        "  4. Reversal / divergence penalty (subtract):\n"
+        "     reversal_alert = 'Potential Bearish Reversal' → −12\n"
+        "     A double divergence (RSI AND MACD same direction bearish) → additional −6\n"
+        "     OBV bearish divergence (obv_divergence = 'Bearish') → additional −4\n"
+        "     'Potential Bullish Reversal' adds nothing and removes nothing — note as context only.\n\n"
 
-        "**HOLD** — in all other cases, including: Fundamental score between 4 and 7, "
-        "mixed signals, OR signal_confidence is Low (ADX < 20 ranging market). Set quantity = 0."
+        "  CONVICTION = technical_component + fundamental_component + news_adjustment − penalties\n"
+        "  Clamp the result to the range 0–100.\n\n"
+
+        "**STEP C — MAP CONVICTION TO ACTION (with hysteresis)**\n"
+        "  - CONVICTION ≥ 62 → BUY\n"
+        "  - CONVICTION ≤ 28 → SELL (only if the stock is currently held; if not held, HOLD — no shorting)\n"
+        "  - 29–61 → HOLD\n"
+        "  Hysteresis: if the stock is ALREADY held, only add to it when CONVICTION ≥ 70 "
+        "(a higher bar than initiating), and only SELL/trim when CONVICTION ≤ 28. "
+        "This prevents churn on borderline scores.\n\n"
+
+        "**STEP D — SIZE THE POSITION (conviction-scaled)**\n"
+        "  BUY, new position:\n"
+        "     size_pct = 0.06 + ((CONVICTION − 62) / 38) × 0.06   [ranges 6% at 62 → 12% at 100]\n"
+        "     S = (E × size_pct) / P\n"
+        "  BUY, adding to an existing position (requires CONVICTION ≥ 70):\n"
+        "     S = (current_position_value × 0.30) / P\n"
+        "  SELL, held position:\n"
+        "     S = (current_position_value × 0.50) / P\n"
+        "  Where S = shares, E = total equity, P = Technical Analyst price.\n"
+        "  Always cap S so that (S × P) does not exceed available buying power.\n\n"
+
+        "**STEP E — APPLY PORTFOLIO RISK FLAGS (advisory sizing adjustments, from Phase 2)**\n"
+        "  - HIGH CONCENTRATION for this ticker → halve S, or HOLD if already at/over the 15% cap.\n"
+        "  - HEAVY EXPOSURE or LOW CASH → halve S.\n"
+        "  - PORTFOLIO DRAWDOWN ≤ −10% → strongly favor HOLD over new BUYs; if still buying, halve S.\n"
+        "  - INTRADAY LOSS → note in thesis; do not override the multi-day conviction score.\n"
+        "  These adjust SIZE only — they do not flip the action unless they push S to ~0.\n\n"
+
+        "Round S down to a whole number of shares. If S rounds to 0, the action becomes HOLD."
     ),
 
     # --- Phase 4 ---
@@ -136,6 +152,9 @@ PM_INSTRUCTIONS = [
         "  - filled_price: the actual fill price from Phase 4 (empty string if not executed)\n"
         "  - execution_note: the note from Phase 4 (empty string for HOLD)\n"
         "  - thesis: 5–6 sentences covering ALL of the following:\n"
+        "      0. The CONVICTION SCORE and its component breakdown, e.g. "
+        "'Conviction 71/100 = technical 30.6 (6/8 × Moderate) + fundamental 28 (score 7) "
+        "+ news +15 − 0 penalty → BUY'. Always show this first.\n"
         "      1. Technical signal, vote tally (e.g. '6 of 8 bullish'), signal_confidence level, "
         "and price used; note bb_squeeze=True as a breakout alert if present\n"
         "      2. Reversal status: if reversal_alert is not 'None', state it and list "
@@ -154,12 +173,13 @@ PM_INSTRUCTIONS = [
     # --- Phase 6 ---
     "### Phase 6: Trade Journal Logging",
     (
-        "After Phase 5 (Notification), call 'log_trade_signals' to record signal "
+        "After Phase 5 (Save Recommendation), call 'log_trade_signals' to record signal "
         "attribution data for this decision. This enables per-signal performance analysis.\n\n"
 
         "Pass the following fields — all are optional except ticker. "
         "Pass None for any field that is unavailable; never pass an empty string.\n"
         "  - ticker: the stock symbol (required)\n"
+        "  - conviction_score: the 0–100 conviction score you computed in Phase 3 Step B\n"
         "  - From the Technical Analyst: overall_signal, signal_confidence, rsi_value, "
         "rsi_signal, momentum_pct, macd_crossover, adx_value, bb_squeeze, "
         "reversal_alert, technical_price\n"

@@ -102,7 +102,35 @@ After the PM agent decides BUY/SELL/HOLD, it executes trades via `execute_trade(
 - **Max position size** — no single position > 15% of total equity (`MAX_POSITION_PCT`)
 - **Daily trade limit** — max 10 trades per day (`MAX_DAILY_TRADES`)
 
-The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check + risk assessment) → Phase 3 (risk-sizing) → **Phase 4 (execute)** → Phase 5 (notify) → Phase 6 (journal).
+The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check + risk assessment) → Phase 3 (conviction scoring + risk-sizing) → **Phase 4 (execute)** → Phase 5 (save recommendation) → Phase 6 (journal).
+
+### Conviction Score (Phase 3)
+
+Phase 3 no longer uses rigid pass/fail gates. It computes a single **conviction score (0–100)** that blends every signal, then maps it to an action:
+
+```
+conviction = technical (0–45, votes/8 × 45 × ADX-confidence multiplier)
+           + fundamental (0–40, score/10 × 40)
+           + news (−15 to +15)
+           − reversal/divergence penalties
+```
+
+- **≥ 62 → BUY** (position size scales 6%→12% of equity with conviction)
+- **≤ 28 → SELL** (held positions only — no shorting)
+- **29–61 → HOLD**
+- Hysteresis: adding to a held position requires conviction ≥ 70. `CRITICAL_RISK: YES` still hard-overrides to SELL.
+
+The score is persisted to `signal_snapshots.conviction_score`. Use `python trade_journal.py signals` to see win rate by conviction band and recalibrate the 62/28 thresholds from realized P&L.
+
+## Exit Management
+
+Held positions are managed mechanically by `manage_exits()` in `pm_agent.py`, which runs at the start of every watchlist scan (and standalone via `python pm_agent.py exits`). It is **separate from the discretionary agent flow** and **not subject to the daily trade limit** — risk-reducing exits are never blocked. For each position it applies, in priority order:
+
+- **Stop-loss** — exit if down ≥ 8% from entry (`STOP_LOSS_PCT`)
+- **Take-profit** — exit if up ≥ 20% from entry (`TAKE_PROFIT_PCT`)
+- **Trailing stop** — once up ≥ 10% (`TRAILING_ACTIVATION_PCT`), exit if price falls ≥ 8% (`TRAILING_STOP_PCT`) from the high-water mark
+
+The high-water mark is persisted in `open_positions.high_water_mark`. Exits submit a market SELL and journal through the FIFO `close_oldest_position` path, so closed trades populate the conviction/signal performance reports.
 
 ## Portfolio Risk Assessment
 
