@@ -91,7 +91,7 @@ Each run, `screener.py` replaces the static watchlist with a market-driven candi
 2. **Fundamental Score < 4** AND **Technical = Bearish** → SELL (if held)
 3. Otherwise → HOLD
 
-**Position sizing formula:** `Shares = (Equity × 0.10) / CurrentPrice` (10% equity risk per trade)
+**Position sizing:** ATR risk-based (see [Position Sizing](#position-sizing-atr-risk-based) below) — each BUY is sized so that hitting its ATR stop costs a conviction-scaled fraction of equity, capped at 15% of equity and available buying power.
 
 ## Trade Execution
 
@@ -115,12 +115,25 @@ conviction = technical (0–45, votes/8 × 45 × ADX-confidence multiplier)
            − reversal/divergence penalties
 ```
 
-- **≥ 62 → BUY** (position size scales 6%→12% of equity with conviction)
+- **≥ 62 → BUY** (size via ATR risk-based sizing — see below)
 - **≤ 28 → SELL** (held positions only — no shorting)
 - **29–61 → HOLD**
 - Hysteresis: adding to a held position requires conviction ≥ 70. `CRITICAL_RISK: YES` still hard-overrides to SELL.
 
 The score is persisted to `signal_snapshots.conviction_score`. Use `python trade_journal.py signals` to see win rate by conviction band and recalibrate the 62/28 thresholds from realized P&L.
+
+### Position Sizing (ATR risk-based)
+
+For BUY actions, Phase 3 calls the `calculate_position_size` tool rather than a fixed equity percentage. It sizes the position so that if the position's **ATR stop is hit, the loss equals a conviction-scaled fraction of equity**:
+
+```
+risk_pct       = 0.5% at conviction 62 → 1.5% at conviction 100   (RISK_PER_TRADE_MIN/MAX)
+risk_budget    = equity × risk_pct
+risk_per_share = bounded_ATR_stop_pct × price        (same stop the exit manager uses)
+shares         = risk_budget / risk_per_share
+```
+
+The share count is then capped at `MAX_POSITION_PCT` (15% of equity, accounting for any existing position) and available buying power; the tool reports which bound was binding. Because entry size and exit stop derive from the **same bounded ATR distance**, volatile names get smaller positions and quiet names larger ones for identical dollar risk. Example at ~$80k equity: KO (low vol) ~116 shares at conviction 65; TSLA (high vol) ~18 shares at conviction 80 — same ~$500–800 risked. Falls back to the fixed 8% stop distance when ATR is unavailable.
 
 ## Exit Management
 

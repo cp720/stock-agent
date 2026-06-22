@@ -65,6 +65,15 @@ ATR_STOP_MAX_PCT = 0.15        # Stop never wider than 15% of price
 STOP_LOSS_PCT = 0.08           # Fallback hard stop when ATR is unavailable
 TRAILING_STOP_PCT = 0.08       # Fallback trailing stop when ATR is unavailable
 
+# --- Risk-based Position Sizing (entry side) ---
+# Size each BUY so that hitting its ATR stop costs a conviction-scaled fraction of
+# equity. This ties entry size to the same volatility measure as the exit stop:
+# volatile names (wide stop) get fewer shares, quiet names (tight stop) get more,
+# for the same dollar risk per trade.
+RISK_PER_TRADE_MIN = 0.005     # Risk 0.5% of equity at the BUY threshold (conviction 62)
+RISK_PER_TRADE_MAX = 0.015     # Risk 1.5% of equity at max conviction (100)
+BUY_CONVICTION_FLOOR = 62.0    # Conviction at which BUY sizing begins (matches Phase 3)
+
 # --- Save Recommendation Tool ---
 @tool(show_result=True)
 def save_recommendation(
@@ -600,6 +609,16 @@ def _get_atr(ticker: str, period: int = ATR_PERIOD) -> Optional[float]:
         return None
 
 
+def _bounded_stop_pct(atr: float, price: float, multiplier: float) -> float:
+    """Stop distance as a fraction of price: multiplier × ATR/price, clamped to bounds.
+
+    Shared by the exit manager (to place stops) and position sizing (to size off the
+    same stop), so the two never disagree about how far away the stop sits.
+    """
+    raw = multiplier * (atr / price)
+    return min(max(raw, ATR_STOP_MIN_PCT), ATR_STOP_MAX_PCT)
+
+
 def _update_high_water_mark(ticker: str, current_price: float) -> float:
     """Persist the running peak price across a ticker's open lots and return that peak.
 
@@ -714,10 +733,9 @@ def manage_exits():
         # fixed-percentage fallback when ATR can't be computed.
         atr = _get_atr(ticker)
         if atr is not None:
-            atr_pct = atr / current
-            stop_pct = min(max(ATR_STOP_MULT * atr_pct, ATR_STOP_MIN_PCT), ATR_STOP_MAX_PCT)
-            trail_pct = min(max(ATR_TRAIL_MULT * atr_pct, ATR_STOP_MIN_PCT), ATR_STOP_MAX_PCT)
-            stop_basis = f"ATR ${atr:.2f}={atr_pct * 100:.1f}%/px × {ATR_STOP_MULT} → {stop_pct * 100:.1f}% stop"
+            stop_pct = _bounded_stop_pct(atr, current, ATR_STOP_MULT)
+            trail_pct = _bounded_stop_pct(atr, current, ATR_TRAIL_MULT)
+            stop_basis = f"ATR ${atr:.2f}={atr / current * 100:.1f}%/px × {ATR_STOP_MULT} → {stop_pct * 100:.1f}% stop"
         else:
             stop_pct = STOP_LOSS_PCT
             trail_pct = TRAILING_STOP_PCT
@@ -749,12 +767,108 @@ def manage_exits():
             logger.error("Unexpected error exiting %s: %s", ticker, e)
 
 
+# --- Risk-based Position Sizing Tool (entry side) ---
+
+@tool(show_result=True)
+def calculate_position_size(ticker: str, conviction: float, price: float) -> dict:
+    """
+    Compute a risk-based BUY size (number of shares) using ATR volatility.
+
+    The position is sized so that if the ATR-based stop-loss is hit, the loss equals a
+    conviction-scaled fraction of equity (0.5% at conviction 62 -> 1.5% at conviction 100).
+    This uses the SAME bounded ATR stop distance the exit manager applies, so entry size
+    and exit stop agree: volatile names (wide stop) get fewer shares, quiet names (tight
+    stop) get more, for the same dollar risk per trade.
+
+    The result is capped at MAX_POSITION_PCT (15%) of equity — accounting for any existing
+    position in the ticker — and at available buying power. Call this in Phase 3 for BUY
+    actions only, after computing the conviction score. If 'shares' is 0, treat as HOLD.
+
+    Args:
+        ticker (str): Stock symbol.
+        conviction (float): The 0-100 conviction score from Phase 3 (BUY value, >= 62).
+        price (float): Current price — use the Technical Analyst's reported price.
+    Returns:
+        dict: 'shares' plus a full breakdown (atr, stop_pct, risk_pct, risk_budget,
+              risk_per_share, capped_by, note) for inclusion in the thesis.
+    """
+    try:
+        account = alpaca_trading_client.get_account()
+        equity = float(account.equity)
+        buying_power = float(account.buying_power)
+    except Exception as e:
+        return {"shares": 0, "note": f"Could not fetch account data: {e}"}
+
+    if price <= 0 or equity <= 0:
+        return {"shares": 0, "note": "Invalid price or equity — cannot size position."}
+
+    # Conviction-scaled risk budget (clamp conviction to the 62-100 BUY band).
+    c = max(BUY_CONVICTION_FLOOR, min(conviction, 100.0))
+    risk_pct = (RISK_PER_TRADE_MIN
+                + ((c - BUY_CONVICTION_FLOOR) / (100.0 - BUY_CONVICTION_FLOOR))
+                * (RISK_PER_TRADE_MAX - RISK_PER_TRADE_MIN))
+    risk_budget = equity * risk_pct
+
+    # Stop distance — identical bounded ATR logic to manage_exits.
+    atr = _get_atr(ticker)
+    if atr is not None:
+        stop_pct = _bounded_stop_pct(atr, price, ATR_STOP_MULT)
+        stop_basis = f"ATR ${atr:.2f} x {ATR_STOP_MULT}"
+    else:
+        stop_pct = STOP_LOSS_PCT
+        stop_basis = "fixed % (ATR unavailable)"
+    risk_per_share = stop_pct * price
+
+    shares_by_risk = risk_budget / risk_per_share if risk_per_share > 0 else 0.0
+
+    # Cap 1: max 15% of equity, accounting for any existing position in this ticker.
+    existing_value = 0.0
+    try:
+        pos = alpaca_trading_client.get_open_position(ticker)
+        existing_value = abs(float(pos.market_value))
+    except APIError:
+        pass  # no existing position
+    except Exception:
+        pass
+    remaining_position_room = max(0.0, equity * MAX_POSITION_PCT - existing_value)
+    shares_by_position = remaining_position_room / price
+
+    # Cap 2: available buying power.
+    shares_by_bp = buying_power / price
+
+    candidates = [
+        (shares_by_risk, "risk_budget"),
+        (shares_by_position, "max_position_15pct"),
+        (shares_by_bp, "buying_power"),
+    ]
+    raw_shares, capped_by = min(candidates, key=lambda x: x[0])
+    shares = int(raw_shares)  # floor to whole shares
+
+    return {
+        "ticker": ticker,
+        "shares": shares,
+        "price": round(price, 2),
+        "conviction": round(conviction, 1),
+        "atr": round(atr, 2) if atr is not None else None,
+        "stop_pct": round(stop_pct * 100, 1),
+        "risk_pct": round(risk_pct * 100, 2),
+        "risk_budget": round(risk_budget, 2),
+        "risk_per_share": round(risk_per_share, 2),
+        "capped_by": capped_by,
+        "note": (
+            f"Risk {risk_pct * 100:.2f}% of ${equity:,.0f} equity = ${risk_budget:,.0f} budget; "
+            f"stop {stop_pct * 100:.1f}% ({stop_basis}) = ${risk_per_share:.2f}/share risk; "
+            f"-> {shares} shares (bound by {capped_by})."
+        ),
+    }
+
+
 # --- The Team ---
 trading_team = Team(
     name="Portfolio Management Team",
     role="Chief Investment Team responsible for making informed trading decisions based on the combined insights of technical and fundamental analysis.",
     members=[fundamental_analyst_agent, technical_analyst_agent, market_news_analyst_agent],
-    tools=[save_recommendation, get_account_balance, get_portfolio_positions, get_portfolio_risk_assessment, execute_trade, log_trade_signals],
+    tools=[save_recommendation, get_account_balance, get_portfolio_positions, get_portfolio_risk_assessment, calculate_position_size, execute_trade, log_trade_signals],
     model=OpenAIChat(id="gpt-4.1", temperature=0.3, api_key=OPENAI_API_KEY),
     add_member_tools_to_context=True,
     add_datetime_to_context=True,
