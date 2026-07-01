@@ -10,13 +10,15 @@ from agno.models.openai import OpenAIChat
 from agno.tools import tool
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.requests import (
+    MarketOrderRequest, GetOrdersRequest, TakeProfitRequest, StopLossRequest,
+)
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 from alpaca.common.exceptions import APIError
 from fundamental_analyst import fundamental_analyst_agent
 from technical_analyst import technical_analyst_agent
@@ -48,22 +50,29 @@ alpaca_data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY
 MAX_POSITION_PCT = 0.15       # No single position > 15% of total equity
 MAX_DAILY_TRADES = 10         # Max 10 executed trades per calendar day
 
-# --- Exit Management Rules (applied mechanically by manage_exits) ---
-TAKE_PROFIT_PCT = 0.20         # Exit if up 20% from entry (profit target — not volatility-scaled)
-TRAILING_ACTIVATION_PCT = 0.10 # Begin trailing once the position is up 10% from entry
+# --- Broker-exit Reconciliation ---
+# Broker-side bracket legs (stop-loss/take-profit) fill without this program running,
+# so the journal isn't notified. reconcile_broker_exits() scans this many days of filled
+# SELL orders and writes any not-yet-journaled exits back into the trade journal.
+RECONCILE_LOOKBACK_DAYS = 7
 
-# Stop distances adapt to each stock's volatility via ATR (Average True Range).
-# stop distance = ATR_*_MULT × ATR, expressed as a % of price, then bounded by the
-# floor/ceiling below so a quiet name isn't stopped on noise and a wild name isn't
-# given an unbounded stop. STOP_LOSS_PCT / TRAILING_STOP_PCT are the fallbacks used
-# when ATR cannot be computed (e.g. data error, insufficient history).
+# --- Broker-side Exit Bracket (attached to every BUY) ---
+# Each BUY is submitted as an Alpaca bracket order: a market entry plus two OCO
+# (one-cancels-other) exit legs that live at the broker. They protect the position
+# 24/7 — even when this program is not running — and the first leg to fill cancels
+# the other. Leg prices are fixed percentages of the entry reference price.
+STOP_LOSS_BRACKET_PCT = 0.05    # Stop-loss leg 5% below entry
+TAKE_PROFIT_BRACKET_PCT = 0.30  # Take-profit (limit) leg 30% above entry
+
+# Stop distances for ENTRY-SIDE risk sizing adapt to each stock's volatility via ATR
+# (Average True Range). stop distance = ATR_STOP_MULT × ATR, expressed as a % of price,
+# bounded by the floor/ceiling below. STOP_LOSS_PCT is the fallback used when ATR cannot
+# be computed (e.g. data error, insufficient history). Used by calculate_position_size.
 ATR_PERIOD = 14                # ATR lookback (trading days)
-ATR_STOP_MULT = 2.5            # Hard stop at entry − 2.5 × ATR
-ATR_TRAIL_MULT = 2.5           # Trailing stop at high-water mark − 2.5 × ATR
+ATR_STOP_MULT = 2.5            # Risk-sizing stop reference: entry − 2.5 × ATR
 ATR_STOP_MIN_PCT = 0.05        # Stop never tighter than 5% of price
 ATR_STOP_MAX_PCT = 0.15        # Stop never wider than 15% of price
 STOP_LOSS_PCT = 0.08           # Fallback hard stop when ATR is unavailable
-TRAILING_STOP_PCT = 0.08       # Fallback trailing stop when ATR is unavailable
 
 # --- Risk-based Position Sizing (entry side) ---
 # Size each BUY so that hitting its ATR stop costs a conviction-scaled fraction of
@@ -449,12 +458,59 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
         except APIError as e:
             logger.warning("Failed to check position size for %s: %s — proceeding.", ticker, e.message)
 
-    # --- Submit market order ---
+    # --- Submit order ---
     try:
+        if action == "BUY":
+            # Attach a broker-side OCO exit bracket: stop-loss 5% below and take-profit
+            # 30% above the entry. Since this is a market entry, the leg prices are derived
+            # from the latest trade price (a few cents of slippage vs. the actual fill is
+            # expected). GTC so the legs persist across sessions and protect 24/7.
+            ref_price = _latest_price(ticker)
+            if ref_price is None or ref_price <= 0:
+                return (
+                    f"execution_status: skipped | "
+                    f"execution_note: Could not fetch a reference price for {ticker} to set "
+                    f"the stop-loss/take-profit bracket. Order not submitted."
+                )
+            stop_price = round(ref_price * (1 - STOP_LOSS_BRACKET_PCT), 2)
+            limit_price = round(ref_price * (1 + TAKE_PROFIT_BRACKET_PCT), 2)
+
+            order_request = MarketOrderRequest(
+                symbol=ticker,
+                qty=quantity,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.GTC,
+                order_class=OrderClass.BRACKET,
+                take_profit=TakeProfitRequest(limit_price=limit_price),
+                stop_loss=StopLossRequest(stop_price=stop_price),
+            )
+            order = alpaca_trading_client.submit_order(order_request)
+
+            logger.info(
+                "Bracket BUY submitted: %d shares of %s — entry ref $%.2f, stop $%.2f (-%.0f%%), "
+                "take-profit $%.2f (+%.0f%%), order_id: %s, status: %s",
+                quantity, ticker, ref_price, stop_price, STOP_LOSS_BRACKET_PCT * 100,
+                limit_price, TAKE_PROFIT_BRACKET_PCT * 100, order.id, order.status
+            )
+
+            return (
+                f"execution_status: executed | "
+                f"order_id: {order.id} | "
+                f"status: {order.status} | "
+                f"filled_qty: {order.filled_qty or 'pending'} | "
+                f"filled_price: {order.filled_avg_price or 'pending'} | "
+                f"execution_note: BUY bracket for {quantity} shares of {ticker} submitted — "
+                f"stop-loss ${stop_price:.2f} (-{STOP_LOSS_BRACKET_PCT*100:.0f}%), "
+                f"take-profit ${limit_price:.2f} (+{TAKE_PROFIT_BRACKET_PCT*100:.0f}%) "
+                f"off ${ref_price:.2f} reference."
+            )
+
+        # SELL — plain market order (closes a held long; legs of any open bracket are
+        # canceled by Alpaca when the position is flattened).
         order_request = MarketOrderRequest(
             symbol=ticker,
             qty=quantity,
-            side=OrderSide.BUY if action == "BUY" else OrderSide.SELL,
+            side=OrderSide.SELL,
             time_in_force=TimeInForce.DAY
         )
         order = alpaca_trading_client.submit_order(order_request)
@@ -579,6 +635,22 @@ def log_trade_signals(
 
 # --- Exit Management (mechanical, runs outside the agent flow) ---
 
+def _latest_price(ticker: str) -> Optional[float]:
+    """Return the latest trade price for a ticker, or None if unavailable.
+
+    Used to set bracket leg prices for a market BUY (the actual fill is unknown at
+    submission time). Uses the IEX feed for free-tier compatibility.
+    """
+    try:
+        req = StockLatestTradeRequest(symbol_or_symbols=ticker, feed=DataFeed.IEX)
+        trade = alpaca_data_client.get_stock_latest_trade(req)
+        price = float(trade[ticker].price)
+        return price if price > 0 else None
+    except Exception as e:
+        logger.warning("Latest-price fetch failed for %s: %s", ticker, e)
+        return None
+
+
 def _get_atr(ticker: str, period: int = ATR_PERIOD) -> Optional[float]:
     """Return the latest ATR (Average True Range) for a ticker, or None if unavailable.
 
@@ -619,154 +691,6 @@ def _bounded_stop_pct(atr: float, price: float, multiplier: float) -> float:
     return min(max(raw, ATR_STOP_MIN_PCT), ATR_STOP_MAX_PCT)
 
 
-def _update_high_water_mark(ticker: str, current_price: float) -> float:
-    """Persist the running peak price across a ticker's open lots and return that peak.
-
-    The high-water mark drives the trailing stop. It is shared across all open lots of a
-    ticker (the peak the position has reached since the earliest still-open entry).
-    """
-    peak = current_price
-    if not JOURNAL_ENABLED:
-        return peak
-    try:
-        initialize_db()
-        lots = list(OpenPosition.select().where(
-            (OpenPosition.ticker == ticker) & (OpenPosition.status == 'open')))
-        for lot in lots:
-            prior = lot.high_water_mark if lot.high_water_mark else lot.entry_price
-            peak = max(peak, prior)
-        for lot in lots:
-            if (lot.high_water_mark or 0.0) < peak:
-                lot.high_water_mark = peak
-                lot.save()
-    except Exception as e:
-        logger.error("Failed to update high-water mark for %s: %s", ticker, e)
-    return peak
-
-
-def _journal_exit(ticker: str, qty: int, fill_price: Optional[float],
-                  order_id: str, reason: str):
-    """Record an automated exit in the journal, mirroring save_recommendation's writes."""
-    if not JOURNAL_ENABLED:
-        return
-    try:
-        initialize_db()
-        acct_equity = acct_buying_power = acct_cash = None
-        try:
-            account = alpaca_trading_client.get_account()
-            acct_equity = float(account.equity)
-            acct_buying_power = float(account.buying_power)
-            acct_cash = float(account.cash)
-        except Exception:
-            pass
-
-        decision = TradeDecision.create(
-            ticker=ticker,
-            action="SELL",
-            quantity=qty,
-            execution_status="executed",
-            order_id=order_id or "",
-            filled_price=fill_price,
-            filled_qty=qty,
-            execution_note=f"Auto-exit: {reason}",
-            equity=acct_equity,
-            buying_power=acct_buying_power,
-            cash=acct_cash,
-            thesis=f"Automated exit triggered ({reason}). Sold {qty} share(s) of {ticker}.",
-        )
-
-        if fill_price is not None:
-            close_oldest_position(ticker, fill_price, qty, decision)
-
-        if acct_equity is not None:
-            EquitySnapshot.create(
-                equity=acct_equity, cash=acct_cash, buying_power=acct_buying_power,
-            )
-
-        logger.info("Exit journaled: SELL %d %s (%s, id: %d)", qty, ticker, reason, decision.id)
-    except Exception as e:
-        logger.error("Failed to journal exit for %s: %s", ticker, e)
-
-
-def manage_exits():
-    """Mechanical exit pass over all held positions.
-
-    Applies, in priority order: hard stop-loss, take-profit, then trailing stop.
-    Runs independently of the discretionary agent flow and is NOT subject to the daily
-    trade limit — risk-reducing exits should never be blocked. Skipped when the market
-    is closed. Triggered exits submit a market SELL and are logged to the journal.
-    """
-    try:
-        clock = alpaca_trading_client.get_clock()
-    except APIError as e:
-        logger.error("Exit manager: failed to read market clock: %s", e.message)
-        return
-    if not clock.is_open:
-        logger.info("Exit manager: market closed — skipping exit checks.")
-        return
-
-    try:
-        positions = alpaca_trading_client.get_all_positions()
-    except APIError as e:
-        logger.error("Exit manager: failed to fetch positions: %s", e.message)
-        return
-
-    if not positions:
-        logger.info("Exit manager: no open positions to evaluate.")
-        return
-
-    for p in positions:
-        ticker = p.symbol
-        try:
-            qty = int(float(p.qty))
-            entry = float(p.avg_entry_price)
-            current = float(p.current_price)
-        except (TypeError, ValueError):
-            continue
-        if qty <= 0 or entry <= 0 or current <= 0:
-            continue
-
-        peak = _update_high_water_mark(ticker, current)
-        gain = (current - entry) / entry
-
-        # Derive volatility-adaptive stop distances from ATR, bounded and with a
-        # fixed-percentage fallback when ATR can't be computed.
-        atr = _get_atr(ticker)
-        if atr is not None:
-            stop_pct = _bounded_stop_pct(atr, current, ATR_STOP_MULT)
-            trail_pct = _bounded_stop_pct(atr, current, ATR_TRAIL_MULT)
-            stop_basis = f"ATR ${atr:.2f}={atr / current * 100:.1f}%/px × {ATR_STOP_MULT} → {stop_pct * 100:.1f}% stop"
-        else:
-            stop_pct = STOP_LOSS_PCT
-            trail_pct = TRAILING_STOP_PCT
-            stop_basis = f"fixed {stop_pct * 100:.0f}% stop (ATR unavailable)"
-
-        reason = None
-        if gain <= -stop_pct:
-            reason = f"stop-loss ({gain * 100:+.1f}% from entry ${entry:.2f}; {stop_basis})"
-        elif gain >= TAKE_PROFIT_PCT:
-            reason = f"take-profit ({gain * 100:+.1f}% from entry ${entry:.2f})"
-        elif ((peak - entry) / entry >= TRAILING_ACTIVATION_PCT
-              and current <= peak * (1 - trail_pct)):
-            drop = (current - peak) / peak
-            reason = (f"trailing-stop ({drop * 100:+.1f}% from peak ${peak:.2f}; "
-                      f"{trail_pct * 100:.1f}% trail, {stop_basis})")
-
-        if reason is None:
-            continue
-
-        logger.info("Exit triggered for %s: %s — submitting SELL %d.", ticker, reason, qty)
-        try:
-            order = alpaca_trading_client.submit_order(MarketOrderRequest(
-                symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY))
-            fill_price = float(order.filled_avg_price) if order.filled_avg_price else current
-            _journal_exit(ticker, qty, fill_price, str(order.id), reason)
-        except APIError as e:
-            logger.error("Exit SELL failed for %s: %s", ticker, e.message)
-        except Exception as e:
-            logger.error("Unexpected error exiting %s: %s", ticker, e)
-
-
 # --- Risk-based Position Sizing Tool (entry side) ---
 
 @tool(show_result=True)
@@ -774,11 +698,12 @@ def calculate_position_size(ticker: str, conviction: float, price: float) -> dic
     """
     Compute a risk-based BUY size (number of shares) using ATR volatility.
 
-    The position is sized so that if the ATR-based stop-loss is hit, the loss equals a
+    The position is sized so that if an ATR-based stop-loss were hit, the loss equals a
     conviction-scaled fraction of equity (0.5% at conviction 62 -> 1.5% at conviction 100).
-    This uses the SAME bounded ATR stop distance the exit manager applies, so entry size
-    and exit stop agree: volatile names (wide stop) get fewer shares, quiet names (tight
-    stop) get more, for the same dollar risk per trade.
+    Volatile names (wide ATR stop) get fewer shares, quiet names (tight stop) get more,
+    for the same dollar risk per trade. NOTE: the broker-side bracket attached at execution
+    uses a fixed STOP_LOSS_BRACKET_PCT stop, so the realized stop may be tighter than this
+    ATR sizing reference — sizing here is the conservative (risk-capping) bound.
 
     The result is capped at MAX_POSITION_PCT (15%) of equity — accounting for any existing
     position in the ticker — and at available buying power. Call this in Phase 3 for BUY
@@ -809,7 +734,7 @@ def calculate_position_size(ticker: str, conviction: float, price: float) -> dic
                 * (RISK_PER_TRADE_MAX - RISK_PER_TRADE_MIN))
     risk_budget = equity * risk_pct
 
-    # Stop distance — identical bounded ATR logic to manage_exits.
+    # Stop distance for risk sizing — bounded ATR logic (entry-side reference).
     atr = _get_atr(ticker)
     if atr is not None:
         stop_pct = _bounded_stop_pct(atr, price, ATR_STOP_MULT)
@@ -863,6 +788,134 @@ def calculate_position_size(ticker: str, conviction: float, price: float) -> dic
     }
 
 
+# --- Broker-exit Reconciliation ---
+
+def reconcile_broker_exits(lookback_days: int = RECONCILE_LOOKBACK_DAYS) -> int:
+    """Sync broker-side bracket exit fills into the trade journal.
+
+    Every BUY ships with an OCO stop-loss/take-profit bracket that lives at Alpaca. When
+    one of those legs fills, this program usually isn't running, so the journal's FIFO
+    position stays open and realized P&L never lands in the reports. This scans recent
+    filled SELL orders and, for any not already journaled, records a SELL TradeDecision
+    and closes the matching open position(s) via close_oldest_position().
+
+    Idempotent: journaled exits are keyed by Alpaca order_id, so re-running is a no-op for
+    already-synced fills. Only exits that match an open journal position are reconciled —
+    entries are still journaled by the normal agent flow (save_recommendation), not here.
+
+    Returns the number of exits reconciled.
+    """
+    if not JOURNAL_ENABLED:
+        logger.info("Reconcile: trade journal disabled — nothing to do.")
+        return 0
+
+    try:
+        initialize_db()
+    except Exception as e:
+        logger.error("Reconcile: DB init failed: %s — aborting.", e)
+        return 0
+
+    since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    try:
+        orders = alpaca_trading_client.get_orders(filter=GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED,
+            side=OrderSide.SELL,
+            after=since,
+            limit=500,
+        ))
+    except APIError as e:
+        logger.error("Reconcile: failed to fetch orders: %s", e.message)
+        return 0
+
+    filled_sells = [
+        o for o in orders
+        if o.filled_at is not None and o.filled_qty and int(float(o.filled_qty)) > 0
+    ]
+    if not filled_sells:
+        logger.info("Reconcile: no filled SELL orders in the last %d days.", lookback_days)
+        return 0
+
+    known_ids = {
+        d.order_id for d in
+        TradeDecision.select(TradeDecision.order_id).where(TradeDecision.order_id != "")
+    }
+
+    reconciled = 0
+    for o in filled_sells:
+        oid = str(o.id)
+        if oid in known_ids:
+            continue  # already journaled — agent SELL or a prior reconcile pass
+
+        ticker = o.symbol
+        qty = int(float(o.filled_qty))
+        price = float(o.filled_avg_price) if o.filled_avg_price else None
+        if price is None or qty <= 0:
+            continue
+
+        # Only reconcile exits that match an open journal position — otherwise there is
+        # nothing to close (e.g. a SELL for a position the journal never tracked).
+        open_lots = list(OpenPosition.select().where(
+            (OpenPosition.ticker == ticker) & (OpenPosition.status == 'open')))
+        open_qty = sum(lot.entry_qty for lot in open_lots)
+        if open_qty <= 0:
+            logger.info(
+                "Reconcile: filled SELL %d %s @ $%.2f (order %s) has no open journal "
+                "position — skipping.", qty, ticker, price, oid[:8])
+            continue
+
+        # Classify the exit from the order type for a readable journal note.
+        otype = str(getattr(o, 'type', '') or '').lower()
+        if 'stop' in otype:
+            reason = "broker stop-loss"
+        elif 'limit' in otype:
+            reason = "broker take-profit"
+        else:
+            reason = "broker exit"
+
+        close_qty = min(qty, int(open_qty))  # never close more than the journal holds
+
+        acct_equity = acct_bp = acct_cash = None
+        try:
+            a = alpaca_trading_client.get_account()
+            acct_equity, acct_bp, acct_cash = float(a.equity), float(a.buying_power), float(a.cash)
+        except Exception:
+            pass
+
+        try:
+            decision = TradeDecision.create(
+                ticker=ticker,
+                action="SELL",
+                quantity=close_qty,
+                execution_status="executed",
+                order_id=oid,
+                filled_price=price,
+                filled_qty=close_qty,
+                execution_note=(
+                    f"Auto-reconciled {reason} — leg filled "
+                    f"{o.filled_at:%Y-%m-%d %H:%M} UTC (not journaled live)."
+                ),
+                equity=acct_equity,
+                buying_power=acct_bp,
+                cash=acct_cash,
+                thesis=(
+                    f"Reconciled broker-side exit ({reason}). Sold {close_qty} share(s) "
+                    f"of {ticker} @ ${price:.2f} from an OCO bracket leg."
+                ),
+            )
+            close_oldest_position(ticker, price, close_qty, decision)
+            if acct_equity is not None:
+                EquitySnapshot.create(equity=acct_equity, cash=acct_cash, buying_power=acct_bp)
+            reconciled += 1
+            logger.info(
+                "Reconciled exit: SELL %d %s @ $%.2f (%s, order %s).",
+                close_qty, ticker, price, reason, oid[:8])
+        except Exception as e:
+            logger.error("Reconcile: failed to journal exit for %s (order %s): %s", ticker, oid[:8], e)
+
+    logger.info("Reconcile complete: %d broker exit(s) synced to the journal.", reconciled)
+    return reconciled
+
+
 # --- The Team ---
 trading_team = Team(
     name="Portfolio Management Team",
@@ -912,9 +965,11 @@ def run_watchlist():
     watchlist = WATCHLIST
     logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(watchlist))
 
-    # Manage existing positions before evaluating new entries — protect capital first.
-    logger.info("Running exit-management pass on held positions ...")
-    manage_exits()
+    # Exits are handled broker-side: every BUY ships with an OCO stop-loss/take-profit
+    # bracket, so held positions are protected 24/7 without a software exit pass here.
+    # First sync any bracket legs that filled while we were offline into the journal.
+    logger.info("Reconciling broker-side exit fills into the journal ...")
+    reconcile_broker_exits()
 
     for i, ticker in enumerate(watchlist):
         if i > 0:
@@ -954,8 +1009,9 @@ def run_watchlist():
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "exits":
-        # Run the mechanical exit pass only — no new-entry analysis.
-        manage_exits()
+    if len(sys.argv) > 1 and sys.argv[1] == "reconcile":
+        # Sync broker-side bracket exit fills into the journal — no new-entry analysis.
+        n = reconcile_broker_exits()
+        print(f"Reconciled {n} broker exit(s) into the trade journal.")
     else:
         run_watchlist()
