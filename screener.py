@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
-from alpaca.data.enums import MarketType, MostActivesBy
+from alpaca.data.enums import DataFeed, MarketType, MostActivesBy
 from alpaca.data.historical import ScreenerClient, StockHistoricalDataClient
 from alpaca.data.requests import (
     MarketMoversRequest,
@@ -135,6 +135,7 @@ def _filter_and_rank(symbols: list[str]) -> list[str]:
                 timeframe=TimeFrame.Day,
                 start=start,
                 end=end,
+                feed=DataFeed.IEX,  # free-tier safe; default SIP rejects the most-recent window
             )
         ).df  # MultiIndex DataFrame: (symbol, timestamp)
     except Exception as exc:

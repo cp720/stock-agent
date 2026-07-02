@@ -1090,8 +1090,19 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 def run_watchlist():
-    """Analyze each ticker in watchlist.py sequentially with rate-limit safeguards."""
-    watchlist = WATCHLIST
+    """Analyze each screener-selected ticker sequentially with rate-limit safeguards.
+
+    The watchlist comes from the dynamic screener (market-driven, capped at 15 by RVOL).
+    get_dynamic_watchlist() already falls back to the static WATCHLIST when its sources
+    fail or every candidate is filtered out; the except here only guards against the
+    screener module itself blowing up.
+    """
+    try:
+        from screener import get_dynamic_watchlist
+        watchlist = get_dynamic_watchlist()
+    except Exception as e:
+        logger.error("Dynamic screener failed: %s — falling back to static WATCHLIST.", e)
+        watchlist = list(WATCHLIST)
     logger.info("=== Watchlist Scan Started — Tickers: %s ===", ", ".join(watchlist))
 
     # Exits are handled broker-side: every BUY ships with an OCO stop-loss/take-profit
