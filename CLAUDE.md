@@ -101,6 +101,7 @@ After the PM agent decides BUY/SELL/HOLD, it executes trades via `execute_trade(
 - **No short selling** — SELL orders skipped if position not held
 - **Max position size** — no single position > 15% of total equity (`MAX_POSITION_PCT`)
 - **Daily trade limit** — max 10 trades per day (`MAX_DAILY_TRADES`)
+- **Protective bracket on every BUY** — each BUY is submitted as an Alpaca **bracket order**: a market entry plus two OCO exit legs that live broker-side (see [Exit Management](#exit-management))
 
 The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check + risk assessment) → Phase 3 (conviction scoring + risk-sizing) → **Phase 4 (execute)** → Phase 5 (save recommendation) → Phase 6 (journal).
 
@@ -129,23 +130,39 @@ For BUY actions, Phase 3 calls the `calculate_position_size` tool rather than a 
 ```
 risk_pct       = 0.5% at conviction 62 → 1.5% at conviction 100   (RISK_PER_TRADE_MIN/MAX)
 risk_budget    = equity × risk_pct
-risk_per_share = bounded_ATR_stop_pct × price        (same stop the exit manager uses)
+risk_per_share = bounded_ATR_stop_pct × price        (entry-side ATR stop reference)
 shares         = risk_budget / risk_per_share
 ```
 
-The share count is then capped at `MAX_POSITION_PCT` (15% of equity, accounting for any existing position) and available buying power; the tool reports which bound was binding. Because entry size and exit stop derive from the **same bounded ATR distance**, volatile names get smaller positions and quiet names larger ones for identical dollar risk. Example at ~$80k equity: KO (low vol) ~116 shares at conviction 65; TSLA (high vol) ~18 shares at conviction 80 — same ~$500–800 risked. Falls back to the fixed 8% stop distance when ATR is unavailable.
+The share count is then capped at `MAX_POSITION_PCT` (15% of equity, accounting for any existing position) and available buying power; the tool reports which bound was binding. Because sizing uses a **bounded ATR distance**, volatile names get smaller positions and quiet names larger ones for identical dollar risk. Example at ~$80k equity: KO (low vol) ~116 shares at conviction 65; TSLA (high vol) ~18 shares at conviction 80 — same ~$500–800 risked. Falls back to the fixed 8% stop distance when ATR is unavailable.
+
+> **Note:** sizing uses an ATR-based stop reference (5–15%), but the broker-side bracket attached at execution uses a **fixed 5% stop** (`STOP_LOSS_BRACKET_PCT`). When the ATR reference is wider than 5%, the realized stop is tighter, so actual dollar risk is **≤** the budgeted amount — sizing is the conservative bound.
 
 ## Exit Management
 
-Held positions are managed mechanically by `manage_exits()` in `pm_agent.py`, which runs at the start of every watchlist scan (and standalone via `python pm_agent.py exits`). It is **separate from the discretionary agent flow** and **not subject to the daily trade limit** — risk-reducing exits are never blocked. For each position it applies, in priority order:
+Exits are handled **broker-side**. Every BUY is submitted as an Alpaca **bracket order** (`OrderClass.BRACKET`) in `execute_trade()` — a market entry plus two OCO (one-cancels-other) exit legs that live at Alpaca:
 
-- **Stop-loss** — exit if price falls `ATR_STOP_MULT × ATR` below entry (volatility-adaptive)
-- **Take-profit** — exit if up ≥ 20% from entry (`TAKE_PROFIT_PCT`)
-- **Trailing stop** — once up ≥ 10% (`TRAILING_ACTIVATION_PCT`), exit if price falls `ATR_TRAIL_MULT × ATR` below the high-water mark
+- **Stop-loss leg** — `STOP_LOSS_BRACKET_PCT` (5%) below the entry reference price
+- **Take-profit leg** — `TAKE_PROFIT_BRACKET_PCT` (30%) above the entry reference price
 
-**ATR-adaptive stops:** stop distances scale to each stock's volatility instead of a flat percentage. The distance is `multiplier × ATR-14` expressed as a % of price, bounded to `[ATR_STOP_MIN_PCT, ATR_STOP_MAX_PCT]` (5–15%) so quiet names aren't stopped on noise and volatile names aren't given unbounded room. ATR is computed from Alpaca daily bars via the IEX feed (free-tier safe). If ATR can't be computed, the stop falls back to the fixed `STOP_LOSS_PCT` / `TRAILING_STOP_PCT` (8%). Example: KO → ~6.3% stop, AAPL → ~8.8%, TSLA → ~12.3%.
+Whichever leg fills first cancels the other. Because the legs are submitted with `TimeInForce.GTC` and live at the broker, **positions are protected 24/7 even when this program is not running** — there is no software exit pass to schedule. Since a market entry's fill price is unknown at submission, the leg prices are derived from the latest IEX trade price (`_latest_price()`), so expect a few cents of slippage versus an exact 5%/30%.
 
-The high-water mark is persisted in `open_positions.high_water_mark`. Exits submit a market SELL and journal through the FIFO `close_oldest_position` path, so closed trades populate the conviction/signal performance reports.
+**Consequences of the broker-side model:**
+
+- There is no `manage_exits()` and no `python pm_agent.py exits` command anymore.
+- Stops/take-profits are **fixed percentages**, not ATR-adaptive or trailing. (Position *sizing* still uses ATR; only the live stop is fixed.)
+- When a bracket leg fills at Alpaca, this program isn't notified live, so the exit is journaled **after the fact** by reconciliation (see below), not at fill time.
+
+### Exit Reconciliation
+
+Because bracket legs fill broker-side while this program is offline, `reconcile_broker_exits()` in `pm_agent.py` syncs those fills into the journal. It scans the last `RECONCILE_LOOKBACK_DAYS` (7) of **filled SELL orders**, and for any whose Alpaca `order_id` isn't already in `trade_decisions`, it writes a SELL `TradeDecision` and closes the matching open position(s) via the FIFO `close_oldest_position` path (computing realized P&L). It runs automatically at the start of every `run_watchlist()` scan, and standalone via:
+
+```bash
+python pm_agent.py reconcile
+```
+
+- **Idempotent** — exits are keyed by `order_id`, so re-running only picks up new fills.
+- **Exits only** — entries are still journaled by the normal agent flow (`save_recommendation`). A reconciled exit is skipped if the journal has no matching open position for that ticker.
 
 ## Portfolio Risk Assessment
 
