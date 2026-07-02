@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from screener import (
+    _expected_session_fraction,
     _filter_and_rank,
     _get_alpaca_candidates,
     _get_yfinance_candidates,
@@ -21,6 +22,8 @@ from screener import (
     MAX_CANDIDATES,
     MIN_PRICE,
     MIN_RVOL,
+    _ET,
+    _MIN_SESSION_FRACTION,
 )
 from watchlist import WATCHLIST as STATIC_WATCHLIST
 
@@ -175,6 +178,106 @@ class TestFilterAndRank:
         with patch("screener.StockHistoricalDataClient", return_value=mock_client):
             result = _filter_and_rank(symbols)
         assert set(result).issubset(set(symbols))
+
+
+# ===========================================================================
+# Intraday RVOL adjustment tests
+# ===========================================================================
+
+# The _make_bars_df helper generates bars ending 2025-02-04; use that as "today"
+# for partial-bar scenarios.
+_LAST_BAR_DAY = datetime(2025, 2, 4)
+
+
+def _et_time(hour: int, minute: int) -> datetime:
+    return _LAST_BAR_DAY.replace(hour=hour, minute=minute, tzinfo=_ET)
+
+
+class TestExpectedSessionFraction:
+
+    def test_before_open_returns_none(self):
+        assert _expected_session_fraction(_et_time(9, 0)) is None
+
+    def test_at_open_returns_none(self):
+        assert _expected_session_fraction(_et_time(9, 30)) is None
+
+    def test_after_close_returns_none(self):
+        assert _expected_session_fraction(_et_time(16, 0)) is None
+        assert _expected_session_fraction(_et_time(19, 45)) is None
+
+    def test_just_after_open_is_floored(self):
+        """First minutes would extrapolate wildly — floored to _MIN_SESSION_FRACTION."""
+        frac = _expected_session_fraction(_et_time(9, 31))
+        assert frac == _MIN_SESSION_FRACTION
+
+    def test_10am_matches_profile_anchor(self):
+        """30 minutes into the session → 0.19 anchor exactly."""
+        assert _expected_session_fraction(_et_time(10, 0)) == pytest.approx(0.19)
+
+    def test_fraction_increases_monotonically(self):
+        times = [(10, 0), (11, 0), (12, 30), (14, 0), (15, 30), (15, 59)]
+        fracs = [_expected_session_fraction(_et_time(h, m)) for h, m in times]
+        assert all(a < b for a, b in zip(fracs, fracs[1:]))
+
+
+class TestIntradayRvolAdjustment:
+
+    def test_partial_bar_understated_rvol_is_rescued(self):
+        """
+        Mid-morning, today's cumulative volume is only 0.5x the daily average —
+        the naive ratio (0.5) fails MIN_RVOL, but scaled by the 10:00 session
+        fraction (0.19) the adjusted RVOL is ~2.6x → passes.
+        """
+        df = _make_bars_df("MORN", close_price=50.0, avg_volume=1_000_000, today_rvol=0.5)
+        mock_client = _mock_bars_response(df)
+        with patch("screener.StockHistoricalDataClient", return_value=mock_client):
+            result = _filter_and_rank(["MORN"], now_et=_et_time(10, 0))
+        assert "MORN" in result
+
+    def test_prior_day_rvol_rescues_quiet_morning(self):
+        """
+        Today's partial volume is negligible, but YESTERDAY traded 3x its average —
+        the prior-day RVOL keeps the ticker in the list.
+        """
+        n = 35
+        dates = pd.date_range("2025-01-01", periods=n, freq="D")
+        vols = np.full(n, 1_000_000.0)
+        vols[-2] = 3_000_000.0   # yesterday: 3x average
+        vols[-1] = 50_000.0      # today so far: negligible
+        closes = np.full(n, 50.0)
+        df = pd.DataFrame(
+            {"open": closes, "high": closes, "low": closes, "close": closes, "volume": vols},
+            index=pd.MultiIndex.from_tuples(
+                [("YEST", d) for d in dates], names=["symbol", "timestamp"]
+            ),
+        )
+        mock_client = _mock_bars_response(df)
+        with patch("screener.StockHistoricalDataClient", return_value=mock_client):
+            result = _filter_and_rank(["YEST"], now_et=_et_time(10, 0))
+        assert "YEST" in result
+
+    def test_outside_market_hours_uses_plain_ratio(self):
+        """
+        Same understated data evaluated pre-market → last bar treated as complete,
+        plain ratio (0.5) fails MIN_RVOL as before.
+        """
+        df = _make_bars_df("PREM", close_price=50.0, avg_volume=1_000_000, today_rvol=0.5)
+        mock_client = _mock_bars_response(df)
+        with patch("screener.StockHistoricalDataClient", return_value=mock_client):
+            result = _filter_and_rank(["PREM"], now_et=_et_time(8, 0))
+        assert result == []
+
+    def test_stale_last_bar_not_treated_as_partial(self):
+        """
+        Mid-session now_et but the last bar is from a PRIOR day (weekend/holiday) —
+        the complete-bar path applies, no intraday scaling.
+        """
+        df = _make_bars_df("STALE", close_price=50.0, avg_volume=1_000_000, today_rvol=0.5)
+        mock_client = _mock_bars_response(df)
+        later = datetime(2025, 2, 6, 10, 0, tzinfo=_ET)  # two days after last bar
+        with patch("screener.StockHistoricalDataClient", return_value=mock_client):
+            result = _filter_and_rank(["STALE"], now_et=later)
+        assert result == []
 
 
 # ===========================================================================

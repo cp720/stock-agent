@@ -79,6 +79,8 @@ Each run, `screener.py` replaces the static watchlist with a market-driven candi
 
 **RVOL (Relative Volume)** = today's bar volume ÷ 30-day average volume. High RVOL signals unusual activity (earnings, news, institutional flow) — the key signal to prioritize for deeper analysis.
 
+**Intraday RVOL adjustment:** during regular hours, "today's" daily bar is partial, so the naive ratio understates activity (a 10:30 run sees only ~25% of a normal day's volume). While the session is open, RVOL = `max(today ÷ (avg × expected_session_fraction), prior-day RVOL)`, where the expected fraction comes from a U-shaped intraday volume curve (`_INTRADAY_CUM_VOL_PROFILE`). This catches both "unusually active right now" and "was unusually active yesterday." Outside market hours the plain complete-bar ratio applies.
+
 **Scalability path (future):**
 - News heat layer — yfinance `.get_news()` count in last 24h as a tiebreaker
 - Earnings calendar filter — avoid or target earnings via yfinance `.calendar`

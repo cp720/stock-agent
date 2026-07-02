@@ -17,12 +17,22 @@ Stage 2 — Filter & rank:
     Sort:    descending RVOL
     Cap:     MAX_CANDIDATES (15)
 
+    RVOL intraday handling: during regular hours "today's" daily bar is partial, so a
+    naive today/avg ratio understates RVOL (~25% of a day's volume by 10:30 would look
+    like RVOL 0.25). While the session is open, RVOL is computed as
+        max(today_cumulative / (avg_vol × expected_session_fraction),  prior-day RVOL)
+    where expected_session_fraction comes from a U-shaped intraday volume curve. This
+    captures "unusually active right now" AND "was unusually active yesterday" without
+    penalizing morning runs. Outside market hours the last bar is complete and the
+    plain ratio is used unchanged.
+
 Fallback: returns WATCHLIST from watchlist.py if all sources fail or filter yields 0.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import yfinance as yf
 from alpaca.data.enums import DataFeed, MarketType, MostActivesBy
@@ -47,6 +57,34 @@ MIN_PRICE = 5.0          # Minimum last-bar close price ($)
 MIN_RVOL = 1.5           # Today's volume must be >= 1.5x 30-day average
 MAX_CANDIDATES = 15      # Maximum tickers returned to the PM agent
 _BAR_LOOKBACK_DAYS = 35  # Fetch 35 calendar days to ensure >= 30 trading-day bars
+
+# Cumulative fraction of a typical US-equity session's volume traded by N minutes
+# after the 9:30 ET open. U-shaped: heavy open, quiet midday, heavy close.
+# Piecewise-linear interpolation between anchors; session is 390 minutes.
+_INTRADAY_CUM_VOL_PROFILE = [
+    (0, 0.00), (15, 0.12), (30, 0.19), (60, 0.28), (120, 0.42),
+    (180, 0.52), (240, 0.61), (300, 0.71), (360, 0.85), (390, 1.00),
+]
+_MIN_SESSION_FRACTION = 0.05  # floor — avoids wild extrapolation in the first minutes
+_ET = ZoneInfo("America/New_York")
+
+
+def _expected_session_fraction(now_et: datetime) -> float | None:
+    """Expected cumulative fraction of the day's volume traded by `now_et`.
+
+    Returns None outside regular hours (before 9:30 or after 16:00 ET) — the last
+    daily bar is then complete and RVOL needs no intraday adjustment. Weekends and
+    holidays are handled upstream: the last bar's date won't match today, so the
+    partial-bar path is never taken.
+    """
+    minutes = (now_et.hour - 9) * 60 + (now_et.minute - 30)
+    if minutes <= 0 or minutes >= 390:
+        return None
+    for (m0, f0), (m1, f1) in zip(_INTRADAY_CUM_VOL_PROFILE, _INTRADAY_CUM_VOL_PROFILE[1:]):
+        if minutes <= m1:
+            frac = f0 + (f1 - f0) * (minutes - m0) / (m1 - m0)
+            return max(frac, _MIN_SESSION_FRACTION)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +147,25 @@ def _get_yfinance_candidates() -> set[str]:
 # Stage 2 — filter and rank by RVOL using Alpaca bar data
 # ---------------------------------------------------------------------------
 
-def _filter_and_rank(symbols: list[str]) -> list[str]:
+def _filter_and_rank(symbols: list[str], now_et: datetime | None = None) -> list[str]:
     """
     Batch-fetch daily bars for all candidates (one Alpaca API call), then:
       - Compute price (last bar close) and RVOL (today vs 30-day avg volume)
+      - During regular hours, today's bar is partial: RVOL is the max of the
+        intraday-adjusted ratio (today ÷ expected session fraction) and the prior
+        complete day's RVOL — see module docstring
       - Drop: price < MIN_PRICE or RVOL < MIN_RVOL
       - Sort by RVOL descending, cap at MAX_CANDIDATES
 
+    `now_et` is injectable for tests; defaults to the current Eastern time.
     Returns a list of ticker symbols.
     """
     if not symbols:
         return []
+
+    if now_et is None:
+        now_et = datetime.now(_ET)
+    session_frac = _expected_session_fraction(now_et)
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=_BAR_LOOKBACK_DAYS)
@@ -163,6 +209,20 @@ def _filter_and_rank(symbols: list[str]) -> list[str]:
                 continue
 
             rvol = today_vol / avg_vol
+
+            # Mid-session, the last bar is today's PARTIAL bar — the plain ratio
+            # understates activity. Use the better of (a) today's volume scaled up
+            # by the expected session fraction and (b) the prior complete day's
+            # RVOL, so a morning run sees both live spikes and yesterday's heat.
+            last_bar_date = sym_bars.index[-1].date()
+            if session_frac is not None and last_bar_date == now_et.date():
+                adjusted_today = (today_vol / session_frac) / avg_vol
+                prev_rvol = 0.0
+                prev_avg = float(sym_bars["volume"].iloc[:-2].mean()) if len(sym_bars) >= 7 else 0.0
+                if prev_avg > 0:
+                    prev_rvol = float(sym_bars["volume"].iloc[-2]) / prev_avg
+                rvol = max(adjusted_today, prev_rvol)
+
             if rvol < MIN_RVOL:
                 continue
 
