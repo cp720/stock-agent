@@ -16,7 +16,8 @@ from alpaca.data.enums import DataFeed
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from alpaca.trading.requests import (
-    MarketOrderRequest, GetOrdersRequest, TakeProfitRequest, StopLossRequest,
+    MarketOrderRequest, LimitOrderRequest, GetOrdersRequest,
+    TakeProfitRequest, StopLossRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderClass
 from alpaca.common.exceptions import APIError
@@ -485,12 +486,16 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
                 stop_loss=StopLossRequest(stop_price=stop_price),
             )
             order = alpaca_trading_client.submit_order(order_request)
+            # Poll for the actual fill — the submit response reports PENDING_NEW, and
+            # the journal needs a real fill price to open the position record.
+            order = _wait_for_fill(order)
 
             logger.info(
                 "Bracket BUY submitted: %d shares of %s — entry ref $%.2f, stop $%.2f (-%.0f%%), "
-                "take-profit $%.2f (+%.0f%%), order_id: %s, status: %s",
+                "take-profit $%.2f (+%.0f%%), order_id: %s, status: %s, filled: %s @ %s",
                 quantity, ticker, ref_price, stop_price, STOP_LOSS_BRACKET_PCT * 100,
-                limit_price, TAKE_PROFIT_BRACKET_PCT * 100, order.id, order.status
+                limit_price, TAKE_PROFIT_BRACKET_PCT * 100, order.id, order.status,
+                order.filled_qty or 0, order.filled_avg_price or "pending"
             )
 
             return (
@@ -505,8 +510,17 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
                 f"off ${ref_price:.2f} reference."
             )
 
-        # SELL — plain market order (closes a held long; legs of any open bracket are
-        # canceled by Alpaca when the position is flattened).
+        # SELL — the position's shares are reserved by the bracket's open exit legs
+        # (qty_available), so a SELL submitted while they're open is rejected. Cancel
+        # them first (either OCO leg cancels its sibling), then sell at market.
+        if not _cancel_open_orders(ticker):
+            return (
+                f"execution_status: failed | "
+                f"execution_note: Could not cancel open exit orders for {ticker} — "
+                f"shares still reserved at the broker. SELL not submitted; the "
+                f"existing bracket stop-loss/take-profit remain in force."
+            )
+
         order_request = MarketOrderRequest(
             symbol=ticker,
             qty=quantity,
@@ -514,11 +528,17 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
             time_in_force=TimeInForce.DAY
         )
         order = alpaca_trading_client.submit_order(order_request)
+        order = _wait_for_fill(order)
 
         logger.info(
-            "Order submitted: %s %d shares of %s — order_id: %s, status: %s",
-            action, quantity, ticker, order.id, order.status
+            "Order submitted: %s %d shares of %s — order_id: %s, status: %s, filled: %s @ %s",
+            action, quantity, ticker, order.id, order.status,
+            order.filled_qty or 0, order.filled_avg_price or "pending"
         )
+
+        # Partial SELLs leave shares behind with no exits (the bracket was canceled
+        # above) — re-attach an OCO stop-loss/take-profit to whatever remains.
+        rearm_note = _rearm_exit_bracket(ticker)
 
         return (
             f"execution_status: executed | "
@@ -526,7 +546,7 @@ def execute_trade(ticker: str, action: str, quantity: int) -> str:
             f"status: {order.status} | "
             f"filled_qty: {order.filled_qty or 'pending'} | "
             f"filled_price: {order.filled_avg_price or 'pending'} | "
-            f"execution_note: {action} order for {quantity} shares of {ticker} submitted successfully."
+            f"execution_note: {action} order for {quantity} shares of {ticker} submitted; {rearm_note}."
         )
     except APIError as e:
         logger.error("Order execution failed for %s %d %s: %s", action, quantity, ticker, e.message)
@@ -649,6 +669,115 @@ def _latest_price(ticker: str) -> Optional[float]:
     except Exception as e:
         logger.warning("Latest-price fetch failed for %s: %s", ticker, e)
         return None
+
+
+def _wait_for_fill(order, timeout_s: float = 12.0, poll_s: float = 1.5):
+    """Poll an order until it reports a fill price, a terminal state, or timeout.
+
+    A market order's submit response almost never contains the fill (status
+    PENDING_NEW). The journal only creates/closes positions when a real fill price
+    is saved, so returning 'pending' silently breaks P&L tracking and exit
+    reconciliation downstream. Returns the freshest order object either way.
+    """
+    deadline = time.monotonic() + timeout_s
+    while not order.filled_avg_price and time.monotonic() < deadline:
+        status = str(order.status).lower()
+        if any(s in status for s in ("canceled", "rejected", "expired")):
+            break
+        time.sleep(poll_s)
+        try:
+            order = alpaca_trading_client.get_order_by_id(order.id)
+        except APIError as e:
+            logger.warning("Fill poll failed for order %s: %s", order.id, e.message)
+            break
+    return order
+
+
+def _cancel_open_orders(ticker: str, timeout_s: float = 10.0, poll_s: float = 1.0) -> bool:
+    """Cancel all open orders for a ticker and wait until none remain.
+
+    Bracket exit legs hold the position's shares at Alpaca (qty_available), so a
+    SELL submitted while they are open is rejected for insufficient quantity.
+    Canceling either OCO leg cancels its sibling. Returns True once the ticker
+    has no open orders.
+    """
+    try:
+        open_orders = alpaca_trading_client.get_orders(filter=GetOrdersRequest(
+            status=QueryOrderStatus.OPEN, symbols=[ticker]))
+    except APIError as e:
+        logger.error("Failed to list open orders for %s: %s", ticker, e.message)
+        return False
+    if not open_orders:
+        return True
+
+    for oo in open_orders:
+        try:
+            alpaca_trading_client.cancel_order_by_id(oo.id)
+        except APIError as e:
+            # The OCO sibling may already be gone after the first cancellation.
+            logger.info("Cancel request for %s order %s: %s", ticker, oo.id, e.message)
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            remaining = alpaca_trading_client.get_orders(filter=GetOrdersRequest(
+                status=QueryOrderStatus.OPEN, symbols=[ticker]))
+        except APIError as e:
+            logger.error("Failed to re-check open orders for %s: %s", ticker, e.message)
+            return False
+        if not remaining:
+            logger.info("All open orders for %s canceled — shares released.", ticker)
+            return True
+        time.sleep(poll_s)
+
+    logger.error("Open orders for %s still pending cancellation after %.0fs.", ticker, timeout_s)
+    return False
+
+
+def _rearm_exit_bracket(ticker: str) -> str:
+    """Re-attach an OCO stop-loss/take-profit to shares remaining after a partial SELL.
+
+    Selling requires canceling the original bracket legs, which strips protection from
+    ALL shares — not just the ones sold. This re-arms the remainder. Leg prices are
+    derived from the latest trade price (not the original entry): after a losing trim
+    the entry-based stop can sit above the market, which Alpaca rejects, so 'protect
+    from here' is the shape that is always valid. Returns a note for the execution report.
+    """
+    try:
+        pos = alpaca_trading_client.get_open_position(ticker)
+        remaining = int(float(pos.qty_available if pos.qty_available is not None else pos.qty))
+    except APIError:
+        return "position fully closed — no exit bracket needed"
+    if remaining <= 0:
+        return "position fully closed — no exit bracket needed"
+
+    ref_price = _latest_price(ticker)
+    if ref_price is None or ref_price <= 0:
+        logger.error("Cannot re-arm exits for %s: no reference price.", ticker)
+        return (f"WARNING: {remaining} remaining share(s) have NO exit orders — "
+                f"could not fetch a reference price to re-arm the bracket")
+
+    stop_price = round(ref_price * (1 - STOP_LOSS_BRACKET_PCT), 2)
+    limit_price = round(ref_price * (1 + TAKE_PROFIT_BRACKET_PCT), 2)
+    try:
+        oco = alpaca_trading_client.submit_order(LimitOrderRequest(
+            symbol=ticker,
+            qty=remaining,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.OCO,
+            take_profit=TakeProfitRequest(limit_price=limit_price),
+            stop_loss=StopLossRequest(stop_price=stop_price),
+        ))
+        logger.info(
+            "Re-armed OCO exits on %d remaining %s: stop $%.2f / take-profit $%.2f (order %s).",
+            remaining, ticker, stop_price, limit_price, oco.id)
+        return (f"re-armed stop ${stop_price:.2f} / take-profit ${limit_price:.2f} "
+                f"on {remaining} remaining share(s)")
+    except APIError as e:
+        logger.error("Failed to re-arm OCO exits for %s: %s", ticker, e.message)
+        return (f"WARNING: {remaining} remaining share(s) have NO exit orders — "
+                f"re-arm failed: {e.message}")
 
 
 def _get_atr(ticker: str, period: int = ATR_PERIOD) -> Optional[float]:

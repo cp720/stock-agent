@@ -102,6 +102,8 @@ After the PM agent decides BUY/SELL/HOLD, it executes trades via `execute_trade(
 - **Max position size** — no single position > 15% of total equity (`MAX_POSITION_PCT`)
 - **Daily trade limit** — max 10 trades per day (`MAX_DAILY_TRADES`)
 - **Protective bracket on every BUY** — each BUY is submitted as an Alpaca **bracket order**: a market entry plus two OCO exit legs that live broker-side (see [Exit Management](#exit-management))
+- **Fill polling** — after submitting, `execute_trade` polls the order (~12s) for the actual fill price instead of returning `pending`, so the journal records real entry/exit prices (required for `open_positions` lifecycle and exit reconciliation)
+- **SELLs cancel bracket legs first** — a position's shares are reserved by its open bracket exit legs, so `execute_trade` cancels the ticker's open orders (OCO: canceling one leg cancels its sibling) before submitting a SELL. After a **partial** SELL, it re-arms an OCO stop-loss/take-profit on the remaining shares, priced off the latest trade (`_rearm_exit_bracket`)
 
 The PM agent flow: Phase 0 (classify) → Phase 1 (investigate) → Phase 2 (account check + risk assessment) → Phase 3 (conviction scoring + risk-sizing) → **Phase 4 (execute)** → Phase 5 (save recommendation) → Phase 6 (journal).
 
